@@ -3,8 +3,14 @@ WITH packages AS (
  WHERE package_id IS NOT NULL AND NOT publisher GROUP BY source_id
 )
 SELECT s.source_id,
+ -- The published leaf is document_kind.list.item. The filename table's list
+ -- element is `element` with an Iceberg field id; DataFusion 55's array
+ -- functions keep that field where 53 rebuilt it as `item`, and a CASE takes
+ -- its first branch's field, so that branch states the published type. The
+ -- cast also gives evidence items the nullable type release normalization
+ -- already declares.
  CASE WHEN f.status='completed' AND coalesce(array_length(f.document_kind),0)>0
- THEN array_sort(array_distinct(f.document_kind)) ELSE coalesce(k.document_kind,{{EMPTY_STRINGS}}) END AS document_kind,
+ THEN arrow_cast(array_sort(array_distinct(f.document_kind)),'List(Utf8)') ELSE coalesce(k.document_kind,{{EMPTY_STRINGS}}) END AS document_kind,
  coalesce(CASE WHEN f.status='completed' THEN array_sort(array_distinct(f.document_family)) END,{{EMPTY_STRINGS}}) AS document_family,
  CASE WHEN f.status='completed' THEN f.congress END AS congress,
  coalesce(u.package_id,CASE WHEN f.status='completed' THEN f.package_id END) AS package_id,
