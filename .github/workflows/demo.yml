@@ -9,7 +9,8 @@ name: Demo
 #
 # The publish steps are jessebrandtdata/demo_deploy's deploy-demo.yml, copied here because this fork is
 # public and demo_deploy is private: GitHub lets a public repository call only public reusable workflows.
-# Needs the secret NEOCITIES_DEMO_TOKEN (the demo site's Neocities API key).
+# Needs the secret NEOCITIES_DEMO_TOKEN (the demo site's Neocities API key) on the "demo" environment.
+# Every published page carries a DEMO banner, a "Demo:" title and noindex (tracker_only.py).
 on:
   push:
     branches: [demo/bill-delay]
@@ -18,6 +19,11 @@ on:
 jobs:
   demo:
     runs-on: ubuntu-latest
+    # The approval gate: the "demo" environment requires a reviewer and holds NEOCITIES_DEMO_TOKEN, so
+    # nothing builds or publishes until the maintainer approves the run.
+    environment:
+      name: demo
+      url: https://demo.jessebrandt.com/congressional-tech/bill-delay/
     concurrency:
       group: demo-congressional-tech
       cancel-in-progress: true
