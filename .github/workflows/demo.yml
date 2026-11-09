@@ -1,26 +1,27 @@
 name: Demo
 
-# Fork-only: publishes the Bill Delay Tracker page from this branch's build of the site to
+# Fork-only: publishes the Bill Delay Tracker page from main's build of the site to
 # https://demo.jessebrandt.com/congressional-tech/bill-delay/. The site is built as usual, then
 # .github/demo/tracker_only.py keeps only the tracker page and what it loads, and points its links to
 # other pages at the live Congressional Tech site. The site is built with base /congressional-tech, so
-# the page's own paths resolve unchanged in that folder. Nothing in the site's source is altered: this
-# branch is the PR branch plus these two files.
+# the page's own paths resolve unchanged in that folder. Nothing in the site's source is altered: the
+# demo is the upstream PR branch (feat/bill-delay-tracker) plus these two files.
 #
 # The publish steps are jessebrandtdata/demo_deploy's deploy-demo.yml, copied here because this fork is
 # public and demo_deploy is private: GitHub lets a public repository call only public reusable workflows.
-# Needs the secret NEOCITIES_DEMO_TOKEN (the demo site's Neocities API key) on the "demo" environment.
+# Needs the secret NEOCITIES_DEMO_KEY (the demo site's Neocities API key), set only on the "demo" environment,
+# which deploys only from the protected main branch.
 # Every published page carries a DEMO banner, a "Demo:" title and noindex (tracker_only.py).
 on:
   push:
-    branches: [demo/bill-delay]
+    branches: [main]
   workflow_dispatch:
 
 jobs:
   demo:
     runs-on: ubuntu-latest
-    # The approval gate: the "demo" environment requires a reviewer and holds NEOCITIES_DEMO_TOKEN, so
-    # nothing builds or publishes until the maintainer approves the run.
+    # The gate: the "demo" environment holds NEOCITIES_DEMO_KEY and accepts deployments only from main,
+    # which takes a reviewed, approved PR to change. No other branch can publish.
     environment:
       name: demo
       url: https://demo.jessebrandt.com/congressional-tech/bill-delay/
@@ -50,14 +51,14 @@ jobs:
 
       - name: Publish to /congressional-tech/
         env:
-          TOKEN: ${{ secrets.NEOCITIES_DEMO_TOKEN }}
+          TOKEN: ${{ secrets.NEOCITIES_DEMO_KEY }}
           PREFIX: congressional-tech
           DIST: demo-dist
         run: |
           set -euo pipefail
           api=https://neocities.org/api
           auth=(-H "Authorization: Bearer $TOKEN")
-          [ -n "$TOKEN" ] || { echo "the secret NEOCITIES_DEMO_TOKEN is not set"; exit 1; }
+          [ -n "$TOKEN" ] || { echo "the secret NEOCITIES_DEMO_KEY is not set"; exit 1; }
           [ -d "$DIST" ] || { echo "no folder $DIST"; exit 1; }
 
           # what the site has under the folder: path -> sha1. list?path= is not recursive, so list the
@@ -91,7 +92,7 @@ jobs:
 
       - name: Keep the root page blank
         env:
-          TOKEN: ${{ secrets.NEOCITIES_DEMO_TOKEN }}
+          TOKEN: ${{ secrets.NEOCITIES_DEMO_KEY }}
         run: |
           set -euo pipefail
           printf '%s\n' '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="robots" content="noindex"><title></title></head><body></body></html>' > index.html
