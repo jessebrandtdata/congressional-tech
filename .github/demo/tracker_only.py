@@ -20,11 +20,27 @@ LOCAL = (f"{PAGE}/", "_astro/", "data/bill-delay/", "favicon.svg", "civic-tech-d
 KEEP = (f"{PAGE}", "_astro", "data/bill-delay", "favicon.svg", "civic-tech-dc.svg")
 HREF = re.compile(r'href="' + re.escape(BASE) + r'([^"]*)"')
 
+# Every published page says it is a demo: a banner above the header, "Demo:" before the title, and
+# noindex so search engines do not list unreviewed figures as if they were the project's.
+BANNER_TEXT = ("DEMO. Work in progress, not an official Civic Tech DC release: figures may contain errors. "
+               "See the note at the foot of the page.")
+BANNER = ('<div role="note" style="background:#eec05e;color:#1b1b1b;font:600 14px/1.4 \'Source Sans 3\','
+          'system-ui,sans-serif;padding:8px 16px;text-align:center">' + BANNER_TEXT + '</div>')
+BODY = re.compile(r"<body[^>]*>")
+TITLE = re.compile(r"<title>")
+HEAD = re.compile(r"<head[^>]*>")
+
 REDIRECT = f"""<!doctype html>
+<html lang="en">
+<head>
 <meta charset="utf-8">
 <title>Bill Delay Tracker</title>
 <meta http-equiv="refresh" content="0; url={PAGE}/">
+</head>
+<body>
 <a href="{PAGE}/">Bill Delay Tracker</a>
+</body>
+</html>
 """
 
 
@@ -34,6 +50,17 @@ def point_at_live_site(html):
         rest = m.group(1)
         return m.group(0) if rest.startswith(LOCAL) else f'href="{LIVE}{rest}"'
     return HREF.sub(swap, html)
+
+
+def stamp_demo(html):
+    """The banner after <body>, "Demo: " in the title, a noindex robots tag in <head>. Each must land once."""
+    for pattern, add, where in ((BODY, BANNER, "after"), (TITLE, "Demo: ", "after"),
+                                (HEAD, '<meta name="robots" content="noindex">', "after")):
+        found = pattern.search(html)
+        if not found:
+            raise SystemExit(f"the page has no {pattern.pattern}; cannot stamp it as a demo")
+        html = html[:found.end()] + add + html[found.end():]
+    return html
 
 
 def main(dist, out):
@@ -53,8 +80,8 @@ def main(dist, out):
         else:
             (out / name).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, out / name)
-    (out / PAGE / "index.html").write_text(point_at_live_site(page.read_text()))
-    (out / "index.html").write_text(REDIRECT)
+    (out / PAGE / "index.html").write_text(stamp_demo(point_at_live_site(page.read_text())))
+    (out / "index.html").write_text(stamp_demo(REDIRECT))
     files = [p for p in out.rglob("*") if p.is_file()]
     print(f"{len(files)} files, {sum(p.stat().st_size for p in files) / 1e6:.1f} MB in {out}")
 
