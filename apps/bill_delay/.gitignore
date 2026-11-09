@@ -1,0 +1,2 @@
+# Built data stays out of git: the Pages workflow rebuilds it from the warehouse on every deploy.
+/data/

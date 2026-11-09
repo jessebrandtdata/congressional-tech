@@ -7,6 +7,7 @@ on:
     branches: [main]
     paths:
       - "apps/site/**"
+      - "apps/bill_delay/**"
       - "apps/explorer_mcp/server.json"
       - "apps/explorer_mcp/skills/explore-congress/SKILL.md"
       - ".node-version"
@@ -23,6 +24,10 @@ on:
     workflows: ["Update committee data"]
     types: [completed]
     branches: [main]
+  # The Bill Delay Tracker reads the spicy-regs warehouse, which publishes a new generation nightly
+  # around 04:30 UTC; a daily rebuild keeps its page current.
+  schedule:
+    - cron: "0 7 * * *"
   workflow_dispatch: {}
 
 permissions:
@@ -52,6 +57,20 @@ jobs:
       - name: Verify the archive readers
         working-directory: apps/site
         run: npm run test:explorer
+      - name: Verify the Bill Delay Tracker
+        run: |
+          (cd apps/bill_delay && python -m unittest discover -s tests)
+          npm --prefix apps/site run test:bill-delay
+      # The tracker's data is built here, not committed: about 85 MB rebuilt from the warehouse in a few
+      # minutes, no key. A warehouse outage must not block the rest of the site, so a failed read
+      # publishes the page without data (it says so) instead of failing the deploy.
+      - name: Build the Bill Delay Tracker data from the spicy-regs warehouse
+        continue-on-error: true
+        working-directory: apps/bill_delay
+        run: |
+          python -m bill_delay.collect_warehouse --congress all
+          python -m bill_delay.delays
+          python -m bill_delay.site_data
       - name: Build Astro site
         working-directory: apps/site
         run: npm run build

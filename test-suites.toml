@@ -66,6 +66,7 @@ roots = [
     "packages/viewer_publication/tests",
     "packages/youtube_api/tests",
     "apps/committee_youtube/tests",
+    "apps/bill_delay/tests",
     "scripts/corpus_recovery/tests",
     "scripts/publication/tests",
     "scripts/measure/tests",

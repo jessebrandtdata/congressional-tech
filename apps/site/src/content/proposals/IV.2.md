@@ -2,7 +2,8 @@
 id: "IV.2"
 title: "Bill Delay Tracker"
 theme: "IV"
-status: "idea"
+status: "built"
+repo: "https://github.com/civictechdc/congressional-tech/tree/main/apps/bill_delay"
 ---
 
 Dashboard that measures the lag between bill text publication and Congress.gov summary availability, with key metrics.
