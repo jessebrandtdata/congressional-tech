@@ -1,0 +1,92 @@
+name: Demo
+
+# Fork-only: publishes the Bill Delay Tracker page from this branch's build of the site to
+# https://demo.jessebrandt.com/congressional-tech/bill-delay/. The site is built as usual, then
+# .github/demo/tracker_only.py keeps only the tracker page and what it loads, and points its links to
+# other pages at the live Congressional Tech site. The site is built with base /congressional-tech, so
+# the page's own paths resolve unchanged in that folder. Nothing in the site's source is altered: this
+# branch is the PR branch plus these two files.
+#
+# The publish steps are jessebrandtdata/demo_deploy's deploy-demo.yml, copied here because this fork is
+# public and demo_deploy is private: GitHub lets a public repository call only public reusable workflows.
+# Needs the secret NEOCITIES_DEMO_TOKEN (the demo site's Neocities API key).
+on:
+  push:
+    branches: [demo/bill-delay]
+  workflow_dispatch:
+
+jobs:
+  demo:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: demo-congressional-tech
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the tracker data, the site, and the tracker-only folder
+        run: |
+          set -euo pipefail
+          # Bill Delay Tracker data from the spicy-regs warehouse (no key)
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet "duckdb==1.5.5"
+          (cd apps/bill_delay \
+            && "$RUNNER_TEMP/venv/bin/python" -m bill_delay.collect_warehouse --congress all \
+            && "$RUNNER_TEMP/venv/bin/python" -m bill_delay.delays \
+            && "$RUNNER_TEMP/venv/bin/python" -m bill_delay.site_data)
+          # the Node release the site pins in .node-version
+          node_version="$(tr -d '\r\n' < .node-version)"
+          curl -fsSL "https://nodejs.org/dist/v${node_version}/node-v${node_version}-linux-x64.tar.xz" | tar -xJ -C "$RUNNER_TEMP"
+          export PATH="$RUNNER_TEMP/node-v${node_version}-linux-x64/bin:$PATH"
+          (cd apps/site && npm ci --workspaces=false --no-audit --no-fund && npm run build)
+          # only the tracker page, its links to other pages pointed at the live site
+          python3 .github/demo/tracker_only.py apps/site/dist demo-dist
+
+      - name: Publish to /congressional-tech/
+        env:
+          TOKEN: ${{ secrets.NEOCITIES_DEMO_TOKEN }}
+          PREFIX: congressional-tech
+          DIST: demo-dist
+        run: |
+          set -euo pipefail
+          api=https://neocities.org/api
+          auth=(-H "Authorization: Bearer $TOKEN")
+          [ -n "$TOKEN" ] || { echo "the secret NEOCITIES_DEMO_TOKEN is not set"; exit 1; }
+          [ -d "$DIST" ] || { echo "no folder $DIST"; exit 1; }
+
+          # what the site has under the folder: path -> sha1. list?path= is not recursive, so list the
+          # whole site and keep the folder's files
+          curl -fsS "${auth[@]}" "$api/list" \
+            | jq -r --arg p "$PREFIX/" '.files[] | select((.is_directory | not) and (.path | startswith($p))) | "\(.sha1_hash) \(.path)"' \
+            | sort > remote.txt
+          # what the build has: path -> sha1
+          (cd "$DIST" && find . -type f -print0 | sort -z | xargs -0 -r sha1sum) \
+            | sed -E "s#^([0-9a-f]+)  \./#\1 $PREFIX/#" | sort > local.txt
+          echo "local files: $(wc -l < local.txt); on the site: $(wc -l < remote.txt)"
+
+          # upload files that are new or changed, a few per request
+          comm -23 local.txt remote.txt | cut -d' ' -f2- > upload.txt
+          echo "uploading $(wc -l < upload.txt) file(s)"
+          args=(); n=0
+          flush() { [ ${#args[@]} -eq 0 ] && return; curl -fsS "${auth[@]}" "${args[@]}" "$api/upload" > /dev/null; args=(); n=0; }
+          while IFS= read -r path; do
+            args+=(-F "$path=@$DIST/${path#"$PREFIX"/}"); n=$((n + 1))
+            [ $n -ge 10 ] && flush
+          done < upload.txt
+          flush
+
+          # delete files under the folder that the build no longer has
+          comm -13 <(cut -d' ' -f2- local.txt | sort) <(cut -d' ' -f2- remote.txt | sort) > delete.txt
+          echo "deleting $(wc -l < delete.txt) file(s)"
+          while IFS= read -r path; do
+            case "$path" in "$PREFIX"/*) ;; *) echo "refusing to delete $path"; exit 1 ;; esac
+            curl -fsS "${auth[@]}" --data-urlencode "filenames[]=$path" "$api/delete" > /dev/null
+          done < delete.txt
+
+      - name: Keep the root page blank
+        env:
+          TOKEN: ${{ secrets.NEOCITIES_DEMO_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="robots" content="noindex"><title></title></head><body></body></html>' > index.html
+          curl -fsS -H "Authorization: Bearer $TOKEN" -F "index.html=@index.html" https://neocities.org/api/upload > /dev/null
