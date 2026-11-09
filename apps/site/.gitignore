@@ -4,3 +4,5 @@ dist/
 .astro/
 # dependencies
 node_modules/
+# Bill Delay Tracker data, written by apps/bill_delay at build time
+public/data/bill-delay/

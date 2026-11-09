@@ -1,0 +1,63 @@
+---
+import Base from '../layouts/Base.astro';
+import BillDelay from '../components/bill-delay/BillDelay';
+import '../styles/dashboard.css';
+import '../styles/bill-delay.css';
+---
+
+<Base
+  title="Bill Delay Tracker"
+  active="bill-delay"
+  description="The lag between a bill's printed text and its first CRS summary on Congress.gov, for every Congress from the 108th on."
+>
+  <section class="page-hero anchor-dark">
+    <div class="container">
+      <p class="eyebrow page-eyebrow">Project IV.2</p>
+      <h1 class="page-title">Bill Delay Tracker</h1>
+      <p class="page-lead lead">
+        Measures the lag between bill text publication and Congress.gov summary
+        availability, with key metrics.
+      </p>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <BillDelay client:visible />
+      <p class="dash-footnote">
+        Data: the bill-family tables of Civic Tech DC's{' '}
+        <a href="https://docs.spicygov.ai">spicy-regs warehouse</a>, rebuilt each
+        deploy by{' '}
+        <a href="https://github.com/civictechdc/congressional-tech/tree/main/apps/bill_delay">apps/bill_delay</a>.
+      </p>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .page-hero {
+    padding-block: var(--ctdc-space-3xl);
+  }
+
+  .page-eyebrow {
+    color: var(--ctdc-gold);
+    margin-bottom: var(--ctdc-space-2xs);
+  }
+
+  .page-title {
+    font-size: var(--ctdc-text-3xl);
+    margin-bottom: var(--ctdc-space-xs);
+  }
+
+  .page-lead {
+    color: var(--ctdc-on-dark);
+    max-width: 44rem;
+    margin: 0;
+  }
+
+  .dash-footnote {
+    margin-top: var(--ctdc-space-lg);
+    font-size: var(--ctdc-text-xs);
+    color: var(--ctdc-ink-muted);
+  }
+</style>
