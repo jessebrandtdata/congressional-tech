@@ -1,0 +1,230 @@
+/* Bill Delay Tracker island: what dashboard.css does not already cover. ctdc tokens only. */
+
+.bd-subtitle {
+  color: var(--ctdc-ink-muted);
+  font-size: var(--ctdc-text-sm);
+  margin-bottom: var(--ctdc-space-md);
+}
+
+.bd .dash-filters {
+  align-items: flex-end;
+}
+
+.bd .dash-filter input[type='date'] {
+  font-family: var(--ctdc-font-sans);
+  font-size: var(--ctdc-text-sm);
+  color: var(--ctdc-ink);
+  background: var(--ctdc-surface);
+  border: 1px solid var(--ctdc-hairline-on-light);
+  border-radius: var(--ctdc-radius-sm);
+  padding: var(--ctdc-space-2xs) var(--ctdc-space-xs);
+}
+
+.bd-clear,
+.bd-link-button,
+.bd-export button {
+  font-family: var(--ctdc-font-sans);
+  font-size: var(--ctdc-text-xs);
+  color: var(--ctdc-ink-muted);
+  background: none;
+  border: 0;
+  padding: var(--ctdc-space-3xs) var(--ctdc-space-2xs);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.bd-clear:hover,
+.bd-link-button:hover,
+.bd-export button:hover,
+.bd-clear:focus-visible,
+.bd-link-button:focus-visible,
+.bd-export button:focus-visible {
+  color: var(--ctdc-primary);
+}
+
+/* six tiles in one row on a desktop-width container, wrapping evenly below it */
+.bd .dash-kpis {
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+}
+
+.bd-stat-value {
+  overflow-wrap: anywhere;
+}
+
+.bd-stat-note,
+.bd-note {
+  font-size: var(--ctdc-text-2xs);
+  color: var(--ctdc-ink-muted);
+}
+
+.bd-note {
+  margin: calc(-1 * var(--ctdc-space-sm)) 0 var(--ctdc-space-md);
+}
+
+.bd-figure {
+  margin: 0 0 var(--ctdc-space-md);
+}
+
+.bd-export {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--ctdc-space-3xs);
+}
+
+.bd-chart {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.bd-chart-title {
+  font-family: var(--ctdc-font-sans);
+  font-size: 14px;
+  font-weight: 600;
+  fill: var(--ctdc-ink);
+}
+
+.bd-chart-note {
+  font-family: var(--ctdc-font-sans);
+  font-size: 12px;
+  fill: var(--ctdc-ink-muted);
+}
+
+.bd-chart-label {
+  font-family: var(--ctdc-font-sans);
+  font-size: 11px;
+  fill: var(--ctdc-ink);
+}
+
+.bd-chart .bd-small {
+  font-size: 9px;
+}
+
+.bd-chart .bd-strong {
+  font-weight: 700;
+}
+
+.bd-chart .bd-blue {
+  fill: var(--ctdc-primary);
+}
+
+.bd-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ctdc-space-2xs) var(--ctdc-space-lg);
+  margin: var(--ctdc-space-3xs) 0 0 56px;
+  font-size: var(--ctdc-text-xs);
+}
+
+.bd-slider,
+.bd-check {
+  display: flex;
+  align-items: center;
+  gap: var(--ctdc-space-2xs);
+}
+
+.bd-slider input {
+  width: min(360px, 50vw);
+  accent-color: var(--ctdc-primary);
+}
+
+.bd-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--ctdc-space-xs);
+}
+
+.bd-list {
+  margin-bottom: var(--ctdc-space-md);
+  font-size: var(--ctdc-text-sm);
+}
+
+.bd-list a {
+  color: var(--ctdc-primary);
+}
+
+.bd-nowrap {
+  white-space: nowrap;
+}
+
+.bd-title {
+  overflow-wrap: anywhere;
+  min-width: 10rem;
+}
+
+.bd-caveat {
+  background: var(--ctdc-surface);
+  border-left: 2px solid var(--ctdc-gold);
+  border-radius: var(--ctdc-radius-md);
+  box-shadow: var(--ctdc-shadow-card);
+  padding: var(--ctdc-space-sm) var(--ctdc-space-md);
+  font-size: var(--ctdc-text-xs);
+  color: var(--ctdc-ink-secondary);
+  line-height: var(--ctdc-leading-normal);
+}
+
+.bd-error {
+  color: #b2182b;
+  font-weight: var(--ctdc-weight-semibold);
+}
+
+.bd-loading {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: var(--ctdc-space-2xs);
+  margin-bottom: var(--ctdc-space-sm);
+  padding: var(--ctdc-space-2xs) var(--ctdc-space-sm);
+  background: var(--ctdc-surface);
+  border-left: 2px solid var(--ctdc-primary);
+  border-radius: var(--ctdc-radius-sm);
+  box-shadow: var(--ctdc-shadow-sm);
+  font-size: var(--ctdc-text-sm);
+}
+
+.bd-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--ctdc-hairline-on-light);
+  border-top-color: var(--ctdc-primary);
+  border-radius: var(--ctdc-radius-full);
+  animation: bd-spin 0.8s linear infinite;
+}
+
+@keyframes bd-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bd-spinner {
+    animation: none;
+    background: var(--ctdc-primary);
+  }
+}
+
+/* the figures dim while another Congress loads, so its charts are never read as the new one's */
+.bd.is-loading .bd-dim {
+  opacity: 0.35;
+  transition: opacity var(--ctdc-duration-fast) var(--ctdc-ease);
+}
+
+@media (max-width: 640px) {
+  .bd-strip {
+    margin-left: 0;
+  }
+
+  .bd-nowrap {
+    white-space: normal;
+  }
+
+  .bd-title {
+    min-width: 0;
+  }
+}
