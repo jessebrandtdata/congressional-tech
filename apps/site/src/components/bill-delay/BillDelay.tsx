@@ -2,11 +2,11 @@
  *  apps/bill_delay builds from the spicy-regs warehouse into public/data/bill-delay/ at deploy time. */
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
-  allCongressesLabel, billLabel, billUrl, congressesIn, congressLabel, congressSeries, cumulativeSeries, cumulativeSize,
+  allCongressesLabel, billLabel, billUrl, congressLabel, cumulativeSeries, cumulativeSize,
   dateBounds, defaultCongress, exportName, filterRecords, headerMetrics, longestLags, measureOptions, mergeCongresses,
   monthlySeries, oldestWaiting, ordinal, toCsv, typeOptions, type CongressEntry, type DateRange, type DelayRecord,
 } from './metrics.ts';
-import { ByCongress, Cumulative, Histogram, MonthlyShare } from './charts.tsx';
+import { Cumulative, Histogram, MonthlyShare } from './charts.tsx';
 import { cardNumber, dayName, fmt } from './scales.ts';
 import { exportCsv, exportPng, exportSvg } from './export.ts';
 
@@ -159,8 +159,6 @@ export default function BillDelay() {
   const word = (measure || 'size').toLowerCase();
   const m = headerMetrics(introduced, measure);
   const reported = headerMetrics(allEditions).reported;
-  const inView = congressesIn(records);
-  const series = congressSeries(index.filter((e) => inView.includes(String(e.congress))), type);
   const active = activeRange(range);
   const scope = active
     ? active.from && active.to ? `${dayName(active.from)} – ${dayName(active.to)}` : active.from ? `from ${dayName(active.from)}` : `to ${dayName(active.to!)}`
@@ -241,7 +239,7 @@ export default function BillDelay() {
               note={`${fmt(m.sizeCounted)} of ${fmt(m.versions)} introduced versions measured`} />
           : <StatTile label={`${word} of bill text`} value="–" note="no parsed text for these bills" />}
         <StatTile label="bills summarized" value={fmt(m.summarized)} note={`${fmt(m.waiting)} still waiting`} />
-        <StatTile label="reported by committee" value={fmt(reported)} note="bills with an rh/rs text version" />
+        <StatTile label="reported by committee" value={fmt(reported)} note="bills with a committee-reported version" />
         <StatTile label="mean lag (days)" value={fmt(m.lagMean)} note={`n=${fmt(m.n)}`} />
         <StatTile label="median lag (days)" value={fmt(m.lagMedian)} />
         <StatTile label="max lag (days)" value={fmt(m.lagMax)} />
@@ -266,11 +264,6 @@ export default function BillDelay() {
             </label>
           </div>
         </Figure>
-        {inView.length > 1 && (
-          <Figure label="by Congress" name={nameFor('by-congress')}>
-            <ByCongress series={series} current={pooled ? null : view.key} />
-          </Figure>
-        )}
         <Figure label="share by month" name={nameFor('timeseries')}>
           <MonthlyShare series={monthlySeries(unranged)} range={active} />
         </Figure>
