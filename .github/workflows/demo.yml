@@ -1,27 +1,27 @@
 name: Demo
 
-# Fork-only: publishes the Bill Delay Tracker page from main's build of the site to
+# Fork-only: publishes the Bill Delay Tracker page from the demo_deploy branch's build of the site to
 # https://demo.jessebrandt.com/congressional-tech/bill-delay/. The site is built as usual, then
 # .github/demo/tracker_only.py keeps only the tracker page and what it loads, and points its links to
 # other pages at the live Congressional Tech site. The site is built with base /congressional-tech, so
 # the page's own paths resolve unchanged in that folder. Nothing in the site's source is altered: the
 # demo is the upstream PR branch (feat/bill-delay-tracker) plus these two files.
 #
-# The publish steps are jessebrandtdata/demo_deploy's deploy-demo.yml, copied here because this fork is
-# public and demo_deploy is private: GitHub lets a public repository call only public reusable workflows.
+# The publish steps are deploy-demo.yml from the jessebrandtdata/demo_deploy repository, copied here because this fork is
+# public and that repository is private: GitHub lets a public repository call only public reusable workflows.
 # Needs the secret NEOCITIES_DEMO_KEY (the demo site's Neocities API key), set only on the "demo" environment,
-# which deploys only from the protected main branch.
+# which deploys only from the protected demo_deploy branch.
 # Every published page carries a DEMO banner, a "Demo:" title and noindex (tracker_only.py).
 on:
   push:
-    branches: [main]
+    branches: [demo_deploy]
   workflow_dispatch:
 
 jobs:
   demo:
     runs-on: ubuntu-latest
-    # The gate: the "demo" environment holds NEOCITIES_DEMO_KEY and accepts deployments only from main,
-    # which takes a reviewed, approved PR to change. No other branch can publish.
+    # The gate: the "demo" environment holds NEOCITIES_DEMO_KEY and accepts deployments only from the protected
+    # demo_deploy branch, and every deployment waits for the required reviewer. No other branch can publish.
     environment:
       name: demo
       url: https://demo.jessebrandt.com/congressional-tech/bill-delay/
