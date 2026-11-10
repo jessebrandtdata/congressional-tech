@@ -220,25 +220,6 @@ export function defaultCongress(entries: CongressEntry[]): string | null {
   return usable.reduce((a, b) => (Number(b.congress) > Number(a.congress) ? b : a)).congress;
 }
 
-/** One point per Congress, oldest first, for the by-Congress chart: introduced bills of the given type, how many have a
- *  summary, how many wait, the median lag from the printed date, and the summaries dated after the Congress ended.
- *  A Congress with no bills of that type is left out. */
-export function congressSeries(entries: CongressEntry[], type = 'all') {
-  return entries
-    .flatMap((e) => {
-      const c = e.comparison?.[type];
-      return c && c.introduced_bills > 0 ? [{ e, c }] : [];
-    })
-    .sort((a, b) => Number(a.e.congress) - Number(b.e.congress))
-    .map(({ e, c }) => ({
-      congress: String(e.congress), ended: Boolean(e.ended), bills: c.introduced_bills, summarized: c.introduced_summarized,
-      otherStage: c.summarized_other_stage ?? 0, // of the summarized, those whose first summary is for a later version
-      waiting: c.introduced_bills - c.introduced_summarized,
-      share: c.introduced_summarized / c.introduced_bills,
-      median: c.median_lag_printed, afterEnd: c.summaries_after_end,
-    }));
-}
-
 /** "H.R. 360": the conventional abbreviation for the bill type, a space, the number. */
 export function billLabel(type: string, number: string | number): string {
   return `${BILL_LABELS[type] ?? String(type).toUpperCase()} ${number}`;
@@ -269,13 +250,6 @@ export function mergeCongresses(docs: [string | number, { records: DelayRecord[]
     for (const r of doc.records) { r.congress = c; out.push(r); }
   }
   return out;
-}
-
-/** The Congresses the records come from, as strings, oldest first (records are tagged with their Congress on load). */
-export function congressesIn(records: DelayRecord[]): string[] {
-  const seen = new Set<string>();
-  for (const r of records) if (r.congress != null) seen.add(String(r.congress));
-  return [...seen].sort((a, b) => Number(a) - Number(b));
 }
 
 /** Header for the pooled view: "All Congresses (108th–119th)", from the lowest and highest number in the index. */

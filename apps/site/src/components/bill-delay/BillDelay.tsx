@@ -2,11 +2,11 @@
  *  apps/bill_delay builds from the spicy-regs warehouse into public/data/bill-delay/ at deploy time. */
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
-  allCongressesLabel, billLabel, billUrl, congressesIn, congressLabel, congressSeries, cumulativeSeries, cumulativeSize,
+  allCongressesLabel, billLabel, billUrl, congressLabel, cumulativeSeries, cumulativeSize,
   dateBounds, defaultCongress, exportName, filterRecords, headerMetrics, longestLags, measureOptions, mergeCongresses,
   monthlySeries, oldestWaiting, ordinal, toCsv, typeOptions, type CongressEntry, type DateRange, type DelayRecord,
 } from './metrics.ts';
-import { ByCongress, Cumulative, Histogram, MonthlyShare } from './charts.tsx';
+import { Cumulative, Histogram, MonthlyShare } from './charts.tsx';
 import { cardNumber, dayName, fmt } from './scales.ts';
 import { exportCsv, exportPng, exportSvg } from './export.ts';
 
@@ -159,8 +159,6 @@ export default function BillDelay() {
   const word = (measure || 'size').toLowerCase();
   const m = headerMetrics(introduced, measure);
   const reported = headerMetrics(allEditions).reported;
-  const inView = congressesIn(records);
-  const series = congressSeries(index.filter((e) => inView.includes(String(e.congress))), type);
   const active = activeRange(range);
   const scope = active
     ? active.from && active.to ? `${dayName(active.from)} – ${dayName(active.to)}` : active.from ? `from ${dayName(active.from)}` : `to ${dayName(active.to!)}`
@@ -266,11 +264,6 @@ export default function BillDelay() {
             </label>
           </div>
         </Figure>
-        {inView.length > 1 && (
-          <Figure label="by Congress" name={nameFor('by-congress')}>
-            <ByCongress series={series} current={pooled ? null : view.key} />
-          </Figure>
-        )}
         <Figure label="share by month" name={nameFor('timeseries')}>
           <MonthlyShare series={monthlySeries(unranged)} range={active} />
         </Figure>
