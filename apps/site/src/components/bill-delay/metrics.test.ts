@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  headerMetrics, binLags, filterRecords, monthlySeries, cumulativeSeries, cumulativeSize, measureOptions, histogramMax, dateBounds, longestLags, oldestWaiting, billLabel, billUrl, ordinal, exportName, toCsv, typeOptions, congressLabel, defaultCongress, congressSeries, mergeCongresses, allCongressesLabel, congressesIn,
+  headerMetrics, binLags, filterRecords, monthlySeries, cumulativeSeries, cumulativeSize, measureOptions, histogramMax, dateBounds, longestLags, oldestWaiting, billLabel, billUrl, ordinal, exportName, toCsv, typeOptions, congressLabel, defaultCongress, mergeCongresses, allCongressesLabel,
 } from './metrics.ts';
 
 const rec = (o) => ({ type: 'hr', number: '1', stage: 'introduced', text_date: '2025-01-10',
@@ -292,21 +292,6 @@ test('a bill whose first summary is for a later version is summarized, with its 
   assert.deepEqual(longestLags([s1869]).map((r) => r.number), ['1869']);
 });
 
-test('congressSeries: summarized includes bills first summarized at a later version', () => {
-  const e = entry(115, { comparison: { all: { introduced_bills: 100, introduced_summarized: 100, summarized_other_stage: 15,
-    median_lag_printed: 132, summaries_after_end: 0 } } });
-  const [p] = congressSeries([e, entry(116)]);
-  assert.deepEqual([p.waiting, p.share, p.otherStage], [0, 1, 15]);
-});
-
-test('congressesIn lists the Congresses the records come from, oldest first', () => {
-  const pooled = mergeCongresses([['119', { records: [rec(), rec({ number: '2' })] }], ['9', { records: [rec()] }],
-    ['110', { records: [rec()] }]]);
-  assert.deepEqual(congressesIn(pooled), ['9', '110', '119']);
-  assert.deepEqual(congressesIn([rec()]), []); // untagged records name no Congress
-  assert.deepEqual(congressesIn([]), []);
-});
-
 test('allCongressesLabel spans the lowest and highest Congress', () => {
   assert.equal(allCongressesLabel([entry(119), entry(108), entry(113)]), 'All Congresses (108th–119th)');
 });
@@ -323,21 +308,6 @@ test('defaultCongress is the newest Congress with an introduced bill, never a fi
   assert.equal(defaultCongress([empty120, entry(119), entry(118)]), '119'); // a new Congress with nothing printed yet
   assert.equal(defaultCongress([entry(121), entry(119)]), '121');
   assert.equal(defaultCongress([]), null);
-});
-
-test('congressSeries runs oldest first, follows the type, drops Congresses with none of it', () => {
-  const a = entry(118, { ended: true, comparison: {
-    all: { introduced_bills: 10, introduced_summarized: 10, median_lag_printed: 40, summaries_after_end: 2 },
-    hres: { introduced_bills: 2, introduced_summarized: 2, median_lag_printed: 5, summaries_after_end: 0 } } });
-  const b = entry(119, { comparison: { all: { introduced_bills: 8, introduced_summarized: 2, median_lag_printed: null, summaries_after_end: 0 } } });
-  const all = congressSeries([b, a]);
-  assert.deepEqual(all.map((s) => s.congress), ['118', '119']);
-  assert.deepEqual(all[0], { congress: '118', ended: true, bills: 10, summarized: 10, otherStage: 0, waiting: 0, share: 1, median: 40, afterEnd: 2 });
-  assert.equal(all[1].waiting, 6);
-  assert.equal(all[1].share, 0.25);
-  assert.equal(all[1].median, null);
-  assert.deepEqual(congressSeries([b, a], 'hres').map((s) => s.congress), ['118']);
-  assert.deepEqual(congressSeries([b, a], 'sres'), []);
 });
 
 test('ordinal handles st/nd/rd/th and the teens', () => {
