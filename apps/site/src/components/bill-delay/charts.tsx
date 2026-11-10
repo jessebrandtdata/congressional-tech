@@ -1,7 +1,7 @@
-/** The Bill Delay Tracker's charts, as inline SVG: lag histogram, by-Congress comparison, monthly share and the
+/** The Bill Delay Tracker's charts, as inline SVG: lag histogram, monthly share and the
  *  two cumulative charts. Each draws in a fixed 920-unit-wide viewBox, so an export is the same file at any width. */
 import type { ReactNode } from 'react';
-import { binLags, headerMetrics, histogramMax, ordinal, type DateRange, type DelayRecord } from './metrics.ts';
+import { binLags, headerMetrics, histogramMax, type DateRange, type DelayRecord } from './metrics.ts';
 import {
   bandScale, dateTicks, fmt, fmtPercent, fmtPercent1, fmtShort, isoDay, linearScale, monthName, stepArea, stepPath,
 } from './scales.ts';
@@ -109,61 +109,6 @@ export function Histogram({ records, width, includeWaiting }: { records: DelayRe
       })}
       <text x={(left + W - right) / 2} y={H - 14} textAnchor="middle" className="bd-chart-label">lag in days</text>
       <YLabel y={(top + H - bottom) / 2}>bills</YLabel>
-    </svg>
-  );
-}
-
-export interface CongressPoint {
-  congress: string;
-  ended: boolean;
-  bills: number;
-  summarized: number;
-  waiting: number;
-  share: number;
-  median: number | null;
-  afterEnd: number;
-}
-
-/** The Congresses in view side by side: the share of introduced bills with a summary, and the median days to it. */
-export function ByCongress({ series, current }: { series: CongressPoint[]; current: string | null }) {
-  if (series.length < 2) return <p className="dash-status">Fewer than two of these Congresses have bills of this type.</p>;
-  const left = 76, right = 16, topY = 58, topH = 120, gap = 40, lowH = 130, H = topY + topH + gap + lowH + 44;
-  const lowY = topY + topH + gap;
-  const x = bandScale(series.map((s) => s.congress), [left, W - right], 0.18);
-  const share = linearScale(1, [topY + topH, topY], 4, false);
-  const lag = linearScale(Math.max(1, ...series.map((s) => s.median ?? 0)), [lowY + lowH, lowY], 4);
-  const tip = (s: CongressPoint) => `${ordinal(s.congress)} Congress${s.ended ? '' : ' (in session)'}: ${fmt(s.bills)} introduced, `
-    + `${fmt(s.summarized)} summarized (${fmtPercent(s.share)}), median ${s.median === null ? '–' : Math.round(s.median)} days`
-    + (s.afterEnd ? `; ${fmt(s.afterEnd)} summaries dated after the Congress ended` : '');
-  const cur = series.find((s) => s.congress === current);
-  return (
-    <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Share of introduced bills with a CRS summary and median lag, by Congress" className="bd-chart">
-      <Title>Introduced bills by Congress: share with a CRS summary, and median days to it.</Title>
-      <Note>Measured from the date printed on the bill in every Congress, so the Congresses line up. Follows the bill type filter, not the dates.</Note>
-      <YAxis scale={share} left={left} format={fmtPercent} />
-      <YAxis scale={lag} left={left} format={fmt} />
-      <YLabel y={topY + topH / 2}>share summarized</YLabel>
-      <YLabel y={lowY + lowH / 2}>median days</YLabel>
-      {series.map((s) => (
-        <g key={s.congress}>
-          <title>{tip(s)}</title>
-          <rect x={x(s.congress)} y={topY} width={x.bandwidth} height={share(s.share) - topY} fill={GOLD} />
-          <rect x={x(s.congress)} y={share(s.share)} width={x.bandwidth} height={topY + topH - share(s.share)} fill={BLUE} />
-          {s.median !== null && (
-            <>
-              <rect x={x(s.congress)} y={lag(s.median)} width={x.bandwidth} height={lowY + lowH - lag(s.median)} fill={BLUE} rx={2} />
-              <text x={x(s.congress) + x.bandwidth / 2} y={lag(s.median) - 4} textAnchor="middle" className="bd-chart-label">{Math.round(s.median)}</text>
-            </>
-          )}
-          <text x={x(s.congress) + x.bandwidth / 2} y={lowY + lowH + 16} textAnchor="middle"
-            className={s.congress === current ? 'bd-chart-label bd-strong' : 'bd-chart-label'}>{ordinal(s.congress)}</text>
-        </g>
-      ))}
-      {cur && (
-        <rect x={x(cur.congress) - 3} y={topY - 4} width={x.bandwidth + 6} height={lowY + lowH - topY + 8} fill="none" stroke={INK} strokeWidth={1.5} rx={3} />
-      )}
-      <Legend x={W - right - 190} y={topY - 14} />
-      <text x={(left + W - right) / 2} y={H - 6} textAnchor="middle" className="bd-chart-label">Congress</text>
     </svg>
   );
 }
