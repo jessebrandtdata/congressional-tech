@@ -166,10 +166,6 @@ export default function BillDelay() {
     ? active.from && active.to ? `${dayName(active.from)} – ${dayName(active.to)}` : active.from ? `from ${dayName(active.from)}` : `to ${dayName(active.to!)}`
     : pooled ? 'All Congresses' : entry?.ended ? 'Whole Congress' : 'Congress to date';
   const nameFor = (kind: string) => exportName(kind, { congress: view.key, type, range }, view.asOf);
-  const ends = new Map(index.map((e) => [String(e.congress), e.end]));
-  const laterStage = allEditions.filter((r) => r.stage !== null && r.stage !== STAGE && r.lag_days !== null).length;
-  const afterEnd = introduced.filter((r) => r.summary_date !== null && r.summary_date > (ends.get(String(r.congress)) ?? '9999')).length;
-  const laterOnly = new Set(introduced.filter((r) => r.lag_days != null && r.summary_stage).map((r) => `${r.congress}-${r.type}${r.number}`)).size;
   const sizeSeries = measure ? cumulativeSize(introduced, measure) : [];
   const unmeasured = sizeSeries.length ? sizeSeries[sizeSeries.length - 1].versionsWithoutSize : 0;
   const billText = (r: DelayRecord) => billLabel(r.type, r.number) + (pooled ? ` (${ordinal(r.congress ?? '')})` : '');
@@ -343,20 +339,14 @@ export default function BillDelay() {
       </div>
 
       <div className="bd-caveat">
-        This page measures the introduced stage, the one stage every Congress has: CRS writes summaries for introduced
-        versions only in the 119th Congress (&ldquo;CRS is not writing bill summaries for subsequent versions of measures as
-        they move through the legislative process&rdquo;, Congress.gov help, Bill Summaries), while earlier Congresses&apos;
-        summaries also cover later versions. Each lag runs from the date printed on the introduced text to the bill&apos;s
-        first CRS summary, whatever version that summary describes.
-        {laterOnly > 0 && ` For ${fmt(laterOnly)} bills in view the first summary describes a later version (a reported bill or the public law, say) because CRS never summarized the introduced one; their lag runs to that summary.`}
-        {` The ${fmt(laterStage)} summaries of later versions in view are kept in the data under their stage.`} Every lag starts at
-        the date printed on the bill, the one start date every Congress has; the text usually becomes readable online days to
-        weeks later, so lags read that much longer than the wait a reader sees. Proposal IV.2 counts pages of bill text; the
-        source data has no page count yet, so the page sizes bills in characters or sections of their parsed text instead.
-        The summary date is the earliest the summary record retains. Summaries first captured before the spicy-regs warehouse
-        began keeping revisions (2026-11-06) carry only their latest revision, so a summary revised later reads slower than it
-        was.
-        {afterEnd > 0 && ` ${fmt(afterEnd)} introduced summaries in view are dated after their Congress ended (on January 2 of the year after its second session): very late summaries, or re-publications of earlier ones.`}
+        Proposal IV.2 counts pages of bill text; the source data has no page count yet, so the page sizes bills in
+        characters or sections of their parsed text instead. The summary date is the earliest the summary record retains.
+        Summaries first captured before the spicy-regs warehouse began keeping revisions (2026-11-06) carry only their
+        latest revision, so a summary revised later reads slower than it was. A few summaries are missing from the source
+        data: the warehouse reads GovInfo&apos;s BILLSTATUS bulk files, which lack some summaries CRS published, mostly ones
+        added after a Congress ended (as of 2026-11-09, 82 in the 118th Congress and 2 in the 117th that GovInfo&apos;s
+        separate BILLSUM files have, plus some that only the Congress.gov API has). Those bills show here as still
+        waiting.
       </div>
     </div>
   );
