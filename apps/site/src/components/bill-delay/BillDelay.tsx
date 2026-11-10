@@ -239,7 +239,7 @@ export default function BillDelay() {
               note={`${fmt(m.sizeCounted)} of ${fmt(m.versions)} introduced versions measured`} />
           : <StatTile label={`${word} of bill text`} value="–" note="no parsed text for these bills" />}
         <StatTile label="bills summarized" value={fmt(m.summarized)} note={`${fmt(m.waiting)} still waiting`} />
-        <StatTile label="reported by committee" value={fmt(reported)} note="bills with an rh/rs text version" />
+        <StatTile label="reported by committee" value={fmt(reported)} note="bills with a committee-reported version" />
         <StatTile label="mean lag (days)" value={fmt(m.lagMean)} note={`n=${fmt(m.n)}`} />
         <StatTile label="median lag (days)" value={fmt(m.lagMedian)} />
         <StatTile label="max lag (days)" value={fmt(m.lagMax)} />
