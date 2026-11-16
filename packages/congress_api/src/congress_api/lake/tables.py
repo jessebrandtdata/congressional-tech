@@ -28,6 +28,7 @@ LAKE_SCHEMA_PATHS = {
     'video_records': ROOT / 'model/lake/video-records.schema.json',
     'committee_records': ROOT / 'model/lake/committee-records.schema.json',
     'playlist_records': ROOT / 'model/lake/playlist-records.schema.json',
+    'transcript_headings': ROOT / 'model/lake/transcript-headings.schema.json',
 }
 TABLE_SPECS = {
     'captures': dict(
@@ -64,7 +65,7 @@ TABLE_SPECS = {
         sort_key=('record_sha', 'source', 'parser_version'),
         writer_profile='part',
         row_group_rows=100_000,
-    ) for name in ('appearance_records', 'video_records', 'committee_records', 'playlist_records')},
+    ) for name in ('appearance_records', 'video_records', 'committee_records', 'playlist_records', 'transcript_headings')},
 }
 
 
@@ -177,6 +178,34 @@ def create_table(*,engine,work,catalog_root,table,schema,location,create_namespa
     return _job(engine,work,catalog_root=catalog_root,operations=operations)
 
 
+def add_optional_columns(*,engine,work,catalog_root,table,expected_schema_id,columns):
+    """Add optional primitive top-level columns while the table's head is `expected_schema_id` (ct-auhc).
+
+    The engine assigns fresh Iceberg field IDs above `highest_field_id`, reports an idempotent no-op
+    when every requested column already exists with the same optional type (even on a stale
+    `expected_schema_id`), and otherwise refuses a stale head (`stale_authority`)."""
+    if type(expected_schema_id) is not int or expected_schema_id<0:
+        raise ValueError('add_optional_columns requires a non-negative integer expected_schema_id')
+    if not isinstance(columns,(list,tuple)) or not columns:
+        raise ValueError('add_optional_columns requires at least one column specification')
+    normalized=[]
+    for item in columns:
+        if not isinstance(item,dict) or not {'name','type'}<=set(item)<={'name','type','doc'}:
+            raise ValueError('Each optional column must be a dict of name, type and optional doc')
+        _identifier(item['name'])
+        if not isinstance(item['type'],str) or not item['type']:
+            raise ValueError('Each optional column requires a primitive Iceberg type name')
+        entry=dict(name=item['name'],type=item['type'])
+        if item.get('doc') is not None:
+            if not isinstance(item['doc'],str):
+                raise ValueError('Optional column doc must be a string')
+            entry['doc']=item['doc']
+        normalized.append(entry)
+    operation=dict(kind='add_columns',name='add_columns',table=table,
+                   expected_schema_id=expected_schema_id,columns=normalized)
+    return _job(engine,work,catalog_root=catalog_root,operations=[operation])['table_operations'][0]
+
+
 def append_rows(source, *, engine,work,catalog_root,table,keys,definition,
                 file_bytes=128<<20,row_group_rows=8192,row_group_bytes=32<<20):
     """Recompute missing keys inside the engine on each catalog conflict.
@@ -212,8 +241,13 @@ def append_rows(source, *, engine,work,catalog_root,table,keys,definition,
     identity_sql=(f'SELECT concat({_literal(identity_prefix)},encode(sha256('
         f"string_agg(DISTINCT {key_json},'' ORDER BY {key_json})),'hex')) AS identity FROM pending")
     join=' AND '.join(f'(incoming.{q} IS NOT DISTINCT FROM existing.{q})' for q in quoted)
+    # Both joins build on the left. First keep incoming keys that already exist,
+    # then reject those keys while streaming incoming payloads. Even duplicated
+    # stored keys cannot enlarge the builds; existing history only streams.
+    incoming_keys=','.join(f'incoming.{q}' for q in quoted)
+    matching_keys=f'(SELECT {incoming_keys} FROM incoming LEFT SEMI JOIN existing ON {join})'
     operation=dict(kind='append',name='append',table=table,current_table='existing',
-        work_table='pending',sql='SELECT incoming.* FROM incoming LEFT ANTI JOIN existing ON '+join,
+        work_table='pending',sql=f'SELECT incoming.* FROM {matching_keys} existing RIGHT ANTI JOIN incoming ON '+join,
         identity_sql=identity_sql,
         layout=dict(file_bytes=file_bytes,row_group_rows=row_group_rows,row_group_bytes=row_group_bytes))
     result=_job(engine,work,catalog_root=catalog_root,
@@ -222,15 +256,11 @@ def append_rows(source, *, engine,work,catalog_root,table,keys,definition,
 
 
 def table_columns(engine, work, source):
-    """Column names of a Parquet file or an exact native table pin (one row read for a pin)."""
+    """Column names of a Parquet file or an exact native table pin, in schema order."""
     if not isinstance(source, dict):
         return pq.read_schema(source).names
-    from congress_api.retention.provenance import run_job
-    rows = run_job(work, engine, inputs=[table_input('t', source)], steps=[], outputs=[],
-                   queries=[dict(name='row', sql='SELECT * FROM t LIMIT 1')])['row']
-    if not rows:
-        raise ValueError('Cannot read the columns of an empty table')
-    return list(rows[0])
+    from congress_api.retention.provenance import query_result
+    return query_result(engine, 'SELECT * FROM t LIMIT 0', {'t': source}, work=work)[0]
 
 
 def column_differential(engine, work, old, new, *, keys, compared, value_columns=(), predicate_sql='true',

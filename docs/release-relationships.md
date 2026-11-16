@@ -32,7 +32,8 @@ Coverage: Date bounds span accepted document dates only and Congress bounds skip
 | `chambers` | `list<dict>` | no | Chambers associated with the document |
 | `congress` | `int16` | yes | Congress number when unambiguous |
 | `format` | `dict` | no | Original file format |
-| `document_date` | `date32` | yes | Date of the document as read; detail.document_date_status says whether it is accepted or suspect |
+| `document_date` | `date32` | yes | Date of the document as read; document_date_status says whether it is accepted or suspect |
+| `document_date_status` | `dict` | yes | accepted, or suspect for a filename date more than 30 days after first_captured or outside the tagged Congress's years (one year of margin); document_date keeps the literal reading either way; null when undated |
 | `first_captured` | `date32` | yes | First good fetch date |
 | `date_kind` | `dict` | no | Basis of the archive date |
 | `saved_kind` | `dict` | no | Original file or recovery |
@@ -46,9 +47,10 @@ Coverage: Date bounds span accepted document dates only and Congress bounds skip
 Nullability: Nullability transcribes data model §8.1 (list.parquet bullet): a type without "nullable" there is required. A required column is refused at write time.
 
 - `version_keys[]`: Shared lowercase hexadecimal endpoint keys identify different editions, not alternate formats of one document. A document can have several keys.
-- `document_kind[]`: Embedded classification values, not foreign keys.
+- `document_kind[]`: Embedded classification values, not foreign keys. Words listed together under synonyms name one kind (the first is the House naming guide's word); filter them as one.
 - `document_family[]`: Embedded filename classification values.
 - `chambers[]`: Embedded chamber labels.
+- `document_kind[]` synonyms: `witness-statement` = `testimony`; `committee-amendment` = `amendment`; `witness-biography` = `biography`; `member-statement` = `opening-statement`; `committee-transcript` = `transcript`.
 
 Outgoing: `document_detail`, `document_meetings`, `document_committees`, `document_bills`, `document_nominations`, `document_members`, `witness_submitted_documents`, `document_editions`.
 
@@ -72,7 +74,7 @@ Coverage: Date bounds span accepted document dates only and Congress bounds skip
 | `saved_media_type` | `dict` | no | Media type of the saved file |
 | `saved_bytes` | `int64` | no | Size of original bytes before storage compression |
 | `document_date_source` | `dict` | yes | Filename, content or meeting date basis |
-| `document_date_status` | `dict` | yes | accepted, or suspect for a filename date more than 30 days after first_captured or outside the tagged Congress's years (one year of margin); document_date keeps the literal reading either way; null when undated |
+| `title_source` | `dict` | yes | Which candidate gave the title: correction, page_title, page_heading (including a dead source page the document showed), link_text, other_format_page_title, other_format_page_heading, copy_link_text, recovered_copy, mods_title, or label_witness (a label with the witness name); null when untitled |
 | `in_archive_since` | `date32` | yes | Earliest known archive import date |
 | `removed_on` | `date32` | yes | Date the publisher removed the document |
 | `review_note` | `string` | yes | Review explanation |
@@ -99,7 +101,8 @@ Coverage: Date bounds span accepted document dates only and Congress bounds skip
 | `chambers` | `list<dict>` | no | Chambers associated with the document |
 | `congress` | `int16` | yes | Congress number when unambiguous |
 | `format` | `dict` | no | Original file format |
-| `document_date` | `date32` | yes | Date of the document as read; detail.document_date_status says whether it is accepted or suspect |
+| `document_date` | `date32` | yes | Date of the document as read; document_date_status says whether it is accepted or suspect |
+| `document_date_status` | `dict` | yes | accepted, or suspect for a filename date more than 30 days after first_captured or outside the tagged Congress's years (one year of margin); document_date keeps the literal reading either way; null when undated |
 | `first_captured` | `date32` | yes | First good fetch date |
 | `date_kind` | `dict` | no | Basis of the archive date |
 | `saved_kind` | `dict` | no | Original file or recovery |
@@ -173,6 +176,28 @@ Nullability: Nullability transcribes data model §8.1 (retired_links.parquet row
 - `address_versions`: Set only when successor_key is null; an address can hold several editions (data model §7.5), so the notice lists them instead of choosing one.
 
 Outgoing: `retired_link_successor`.
+
+Incoming: none.
+
+## `corrections` — Permanent recovery rejections that corrected dead-link answers
+
+One rejected recovery copy for an original dead address.
+
+Identity: `original_url, rejected_body` (primary_key; published identifier).
+
+| Field | Published type | Nullable | Meaning |
+| --- | --- | --- | --- |
+| `original_url` | `string` | no | Original dead address whose wrong recovered copy was rejected |
+| `rejected_body` | `fixed[32]` | no | SHA-256 of the rejected recovery copy for original_url |
+| `decision_id` | `string` | no | Permanent provenance recovery rejection record identifier |
+| `decided_at` | `timestamp` | no | UTC timestamp when the rejection was recorded |
+| `recovered_url` | `string` | yes | Address where the rejected copy was found, when recorded |
+| `identity_note` | `string` | yes | Authored explanation of why the copy was rejected, when recorded |
+
+Nullability: original_url, rejected_body, decision_id and decided_at are required on every active rejection decision; recovered_url and identity_note are optional provenance fields. A required column is refused at write time.
+
+
+Outgoing: none.
 
 Incoming: none.
 
@@ -278,12 +303,13 @@ Identity: `event_id` (primary_key; published identifier).
 | `not_held` | `bool` | yes | Publisher status Canceled or Postponed, or the title opens with postponed, canceled or test; false where the meeting's own print was held that day under its title, or a curated read found the meeting's own recording of it on its date (status conflict, model/registries/meeting-status-conflicts.json); null with no record |
 | `rescheduled_to` | `int64` | yes | Later meeting of the same committees and title, parts included, within 60 days that is not itself not held: when this meeting is not held, or has no recording, transcript file or witnesses of its own and either the publisher states Rescheduled or only the later twin has a recording; a hearing never moves to a markup; derived |
 | `rescheduled_basis` | `dict` | yes | publisher_status or recording_on_later_twin |
-| `document_references` | `list<struct<collection string, ordinal int32, url string, role string, format string, description string, name string>>` | yes | Congress.gov document links in source collection order. Null means the metadata is unavailable or unstated. An empty list means a supplied collection contained no links. |
+| `document_references` | `list<struct<collection string, ordinal int32, url string, role string, format string, description string, name string, listing_status string, last_listed_on date32, unlisted_since date32, unlisted_by_record_sha string>>` | yes | Congress.gov document links in source collection order, plus earlier Congress.gov document links no longer listed on the current read (listing_status no_longer_listed). Null means the metadata is unavailable or unstated. An empty list means a supplied collection contained no links. |
+| `unlisted_subjects` | `list<struct<subject_key string, last_listed_on date32, unlisted_since date32, unlisted_by_record_sha string>>` | no | Bills and nominations that an earlier Congress.gov read of this meeting listed and the current read omits, with the date last seen listed and the date and SHA-256 of the read that stopped listing each |
 | `publisher_status` | `string` | yes | Selected publisher-reported status, independent of the outcome |
 | `publisher_status_observations` | `list<struct<source string,status string,meeting_date date32,record_sha string,observed_at timestamp>>` | yes | All retained publisher status observations, including conflicting statuses and dates; record_sha identifies raw evidence |
 | `outcome` | `string` | yes | held, canceled or unknown on this event date; older releases omit outcome evidence |
 | `outcome_basis` | `string` | yes | printed_hearing, committee_transcript, curated_source_review, publisher_cancellation or no_outcome_evidence |
-| `outcome_source_reference` | `string` | yes | Print package ID, transcript list_row, or event ID with source observations/review |
+| `outcome_source_reference` | `string` | yes | Print package ID, transcript document link_key, event ID with curated review, or cancellation record_sha |
 | `outcome_reason` | `string` | yes | Evidence supporting outcome, or why the date-specific outcome remains unknown |
 | `congress_gov_detail_observation` | `struct<state string,coverage string,successful_read struct<source_url string,retrieved_at timestamp,receipt_key string,receipt_line int32,capture_index int32,body_sha256 string,meeting_parser_version string,proof_parser_version string>,latest_attempt struct<evidence struct<source_url string,retrieved_at timestamp,receipt_key string,receipt_line int32,capture_index int32,body_sha256 string,meeting_parser_version string,proof_parser_version string>,state string,outcome string,http_status int32>,listing struct<source_url string,retrieved_at timestamp,receipt_key string,receipt_line int32,capture_index int32,body_sha256 string,meeting_parser_version string,proof_parser_version string>,has_undated_attempt boolean>` | no | Event-specific Congress.gov detail evidence. successful means an exact requested and final Congress/chamber/event detail route, successful receipt, and same-body selected meeting identity and qualified detail-only appearance reader. failed means recorded failures without a success or uncertain detail response. listing_only_in_scope means a proven listing and no detail success, failure or uncertain detail response in selected release inputs. unknown preserves missing or unqualified evidence. coverage is selected_release_inputs or unknown; it never claims complete acquisition history. successful_read and latest_attempt keep their own receipt and retrieval time; a later failure does not erase success. Among dated observations the latest is selected, then receipt locator breaks ties; has_undated_attempt marks attempts that cannot be ordered by time. Missing retrieval times stay null. Publisher update time remains congress_gov_updated. SpicyRegs journal recorded_at is separate and is not supplied by archive captures. |
 
@@ -300,6 +326,8 @@ Nullability: Nullability transcribes data model §8.1 (meetings.parquet row); ac
 - `document_references[].url`: Publisher link. Use the existing document address lookup to find saved copies.
 - `document_references[].role`: Publisher documentType. Null when omitted.
 - `document_references[].format`: Publisher format, independent of the format of the saved body. Null when omitted.
+- `document_references[].listing_status`: listed when present on the current Congress.gov read; no_longer_listed when an earlier Congress.gov read of this meeting listed the URL and a later read omitted it (ct-960v).
+- `unlisted_subjects[]`: Measures and nominations an earlier Congress.gov read of this meeting listed that are absent from the current subject_keys list (ct-960v).
 - `publisher_status_observations[]`: Retained source statuses include their own meeting date and raw record identity; a changed date must not transfer a cancellation to another sitting.
 - `congress_gov_detail_observation`: Evidence for the full Congress/chamber/event identity in selected release inputs only. Missing evidence stays unknown; this object does not certify complete acquisition history.
 - `congress_gov_detail_observation.successful_read`: One qualified successful receipt and its response digest, retrieval time and selected reader versions. Nullable; retained independently of later failures.
@@ -317,9 +345,17 @@ One source-occurrence witness observation at a meeting, package, or page; not a 
 
 Identity: `witness_key` (primary_key; published identifier).
 
+Coverage: Sitting Members the rules cannot read stay witnesses: on the 2026-11-10 release, at least 99 shown rows, of which about 31 state an office but give a first name the members data does not hold (initial-only or middle-name Members such as T. Slade Gorton or J. French Hill, typos such as 'Partick' Leahy), 13 are print headings garbled into names, 5 state a role the rules do not read, 49 give a name alone at an ordinary hearing, and 1 a name with another Member's state at a Member Day hearing; about 20 more are question-and-answer lines of committee Members..
+
+Coverage: member_day cannot tell a sitting Member from an outside witness of the same name listed by name alone at a Member Day hearing: nothing in the row says which, and Member Day hearings sometimes also hear outside witnesses ('Member Day and Outside Witnesses', 'Public Witness Testimony'). Such a namesake would be published as that Member; none was found in this release..
+
+Coverage: The congressional commissions in model/registries/congressional-commissions.json carry statute citations marked unverified until checked against the law's text..
+
+Coverage: A committee member's opening statement stays a member_appearance when the rule cannot see it: before the 113th Congress when the print's own MODS member list omits the Member (it lists only some members); when neither the meeting nor the print names the hearing's committee; and when the print's line labels the statement only by a heading the parser does not keep in the row's fields ('OPENING STATEMENTS Crapo, Hon. Michael D.'). The print's own committee code and member list come from its MODS through the appearance records, which the lake's MODS producer does not yet fill..
+
 | Field | Published type | Nullable | Meaning |
 | --- | --- | --- | --- |
-| `witness_key` | `string` | no | Lowercase hex of first 8 bytes of SHA-256 of ["witness-occurrence-v2", occasion, source, record_sha_hex, source_locator, context_key] |
+| `witness_key` | `string` | no | Published witness appearance key: carried forward from the live release when matched by (source, record_sha, source_locator) or unique (source, occasion, package_id, normalized name, organization, position, occurrence_ordinal); otherwise lowercase hex of first 8 bytes of SHA-256 of ["witness-appearance-v3", occasion, source, coalesce(package_id, ""), name_t, organization_t, position_t, occurrence_ordinal] |
 | `occasion` | `dict` | no | Appearance occasion key (meeting:{event_id}, package:{package_id}, or page:{sha256_prefix}) |
 | `source` | `dict` | no | Observation source family (house_xml, congress_gov, senate_page, or mods) |
 | `record_sha` | `fixed[32]` | no | SHA-256 of the source body or inline record supplying this witness observation |
@@ -329,6 +365,8 @@ Identity: `witness_key` (primary_key; published identifier).
 | `package_id` | `string` | yes | GovInfo CHRG package ID when occasion is a package or matched transcript |
 | `page_url` | `string` | yes | Senate hearing page URL when occasion is a page |
 | `name` | `string` | yes | Display name of the witness |
+| `rank` | `string` | yes | Military rank of the witness when stated (e.g. Lt. Gen., Rear Adm.); extracted from the witness heading rather than left in name (owner decision 2026-11-10, ct-17op) |
+| `credentials` | `string` | yes | Academic, professional, or service credentials of the witness when stated (e.g. M.D., M.P.H., Ph.D., USAF (Ret.)); extracted rather than dropped or left in name (owner decision 2026-11-10, ct-17op) |
 | `position` | `string` | yes | Witness title or position |
 | `organization` | `string` | yes | Witness organization or affiliation |
 | `on_behalf_of` | `string` | yes | Represented entity when distinct from organization |
@@ -336,18 +374,26 @@ Identity: `witness_key` (primary_key; published identifier).
 | `panel` | `string` | yes | Panel heading or label |
 | `panel_order` | `int16` | yes | 1-based panel order within the occasion |
 | `display_order` | `int16` | yes | 1-based witness display order within the occasion or panel |
-| `witness_type` | `dict` | yes | Source witness classification; for GovInfo prints, statement_for_record or member_statement marks an entry that is a statement, not a witness |
+| `witness_type` | `dict` | yes | Witness classification: the source's (house_xml's own witness type), for GovInfo prints statement_for_record, member_statement or record_material when the entry is a statement, not a witness, and member_appearance when the archive matched a sitting Member of Congress acting officially (matched_bioguide_id, match_basis), or member_statement when that Member sits, by the pinned rosters, on the hearing's committee or its parent committee in the Congress of the hearing and the row says opening statement (a committee member's own opening statement). For member_appearance rows, and member_statement rows with a matched_bioguide_id, this is the archive's classification and replaces the source's value, which stays in the appearance record (appearance_records lake, witness_type) and the raw source body (record_sha) |
 | `testified` | `boolean` | yes | Whether the witness testified |
-| `bioguide_id` | `dict` | yes | Bioguide identifier when the witness is a Member of Congress |
+| `bioguide_id` | `dict` | yes | Bioguide identifier the publisher states for the witness (house_xml); never inferred |
 | `superseded_by` | `string` | yes | witness_key of the same person stated on the same meeting by a higher-ranked source (source priority, then record); null for the row to show |
+| `matched_bioguide_id` | `dict` | yes | Member of Congress the archive matched to a member_appearance row, or to a member_statement row that is a committee member's own opening statement, holding office on the hearing date: the publisher's Bioguide ID, or the stated name and term dates (see match_basis); null on every other row |
+| `match_basis` | `dict` | yes | How matched_bioguide_id was found. publisher_id: the source's own Bioguide ID, of a Member with a term covering the hearing date. Every other basis is archive-matched and needs a term covering the hearing date and no word of the row saying former, a closed span of years, a state legislature, a House or Senate officer or staffer, or the person's own nomination; the bases are tried in this order. The name bases need the row's last name to be a word of the Member's name_last and a first name of the row that equals the Member's first name or the nickname the members data holds (an equal first name is required when several Members fit), shares its first three letters, or spells out an abbreviated one ('Wm.'), a lone initial never counting for a full name. name_state: the row names that term's state, plus a chamber, a congressional role, or nothing but Congress and places; name_chamber: it names that term's chamber ('U.S. Senator', 'Representative in Congress', a district code like '(NM-01)', 'Rep.' alone) or 'Member of Congress', and no state; name_role: it opens a field with a chair, ranking member or leadership role of a committee, subcommittee, caucus or conference, or names a commission on which Members serve as Members (model/registries/congressional-commissions.json), names no state, and its first name agrees in full. seat: no name basis gives one Member, the row states a House seat (a state and district: '46th District; California', '(AR-2)'; a state at large: '(ND-At Large)'; or a territory's Delegate or Resident Commissioner: 'a Delegate from Guam'), names no state legislature, and a word of its name or first field is the family name of the Member holding that seat on the hearing date; no first name is needed. initial: no name basis has a candidate and no seat decides, the row names a chamber (or 'Member of Congress') and a state, one side of the first name is a bare initial ('C.' Cox in the members data, 'JD' Vance in the row) that the other starts with, and that Member is the only one sitting in the named chamber and state on the hearing date whose family name and a first-name initial the row shares. member_day: the row is a name with no other field at a hearing whose title says Member Day or Members' Day (not Former Members Day), and its family and first name agree with exactly one Member sitting on the hearing date (an equal first name decides between several). group: another source's row of the same appearance (superseded_by) matched |
+| `person_key` | `string` | yes | Published person identifier in people.parquet (Bioguide ID for matched/publisher Members; 16-hex person-v1 or person-singleton-v1 key for non-Members; inherited across superseded_by); null on record entries, unnamed rows, and unmatched member_appearance rows (ct-ha10) |
+| `listing_status` | `dict` | no | listed when present on the source's current record; no_longer_listed when an earlier Congress.gov read of this meeting listed the witness and a later Congress.gov read omitted them (ct-960v) |
+| `last_listed_on` | `date32` | yes | Date of the latest Congress.gov read that still listed a no_longer_listed witness; null when listing_status is listed |
+| `unlisted_since` | `date32` | yes | Date of the earliest subsequent Congress.gov read that stopped listing a no_longer_listed witness; null when listing_status is listed |
+| `unlisted_by_record_sha` | `string` | yes | Lowercase SHA-256 of the earliest subsequent Congress.gov read that stopped listing a no_longer_listed witness; null when listing_status is listed |
 
 Nullability: Nullability transcribes the phase-2 annex §3 file table (docs/plans/phase-2-annex-20261028.md): a type without "nullable" there is required. A required column is refused at write time.
 
-- `occasion`: meeting:{event_id}, package:{package_id}, or page:{sha256_prefix}. Witness keys hash the occasion, source, record_sha, source_locator, and context_key; names alone never join or deduplicate appearances.
+- `occasion`: meeting:{event_id}, package:{package_id}, or page:{sha256_prefix}. Live witness keys carry forward across re-fetches and parser updates; genuinely new entries mint witness-appearance-v3 keys. Names alone never join or deduplicate appearances.
+- `witness_type`: A sitting Member of Congress acting officially is a Member appearance, not a witness (ct-kw85): witness_type member_appearance, kept in the hearing's list with that label and left out of witness counts. An archive match needs the row's own state, chamber or committee role and an agreeing first name, a stated House seat whose holder's family name the row gives, a bare initial only one sitting Member in the stated chamber and state shares, or a name alone at a Member Day hearing that only one sitting Member's name fits (match_basis); several fitting Members, a former Member, a state legislator, a congressional employee and the hearing's own nominee stay witnesses, and a row that names a Member with nothing else stays a witness. A committee member's own opening statement at the hearing is a member_statement with its matched Member, not a Member appearance (owner decision 2026-11-10): the row says opening statement and the Member is seated, in the Congress of the hearing date, on the hearing's committee (the meeting's, else the print's: its own documents' committees and its own MODS committee code) or on its parent committee (a subcommittee code's first four letters and '00', since a full committee's chair and ranking member open its subcommittees' hearings but rosters seat them on the full committee only). Seated means the pinned rosters, or, for a Congress they do not hold (before the 113th), the print's own MODS committee member list.
 
-Outgoing: `witness_meeting`, `witness_transcript_documents`, `witness_member`, `witness_package`, `witness_page`.
+Outgoing: `witness_meeting`, `witness_transcript_documents`, `witness_member`, `witness_matched_member`, `witness_person`, `witness_package`, `witness_page`.
 
-Incoming: `witness_submitted_documents`, `witness_key_map_successor`, `witness_key_map_candidates`.
+Incoming: `witness_submitted_documents`, `person_witnesses`, `witness_key_map_successor`, `witness_key_map_candidates`.
 
 ## `witness_key_map` — Earlier witness keys and the current witness each resolves to
 
@@ -355,7 +401,7 @@ One witness key this release no longer publishes, with its successor, its candid
 
 Identity: `old_key` (primary_key; published identifier).
 
-Coverage: Derived from earlier bodies the lake still holds, not from earlier releases: a key published only from a body no longer held has no row.
+Coverage: Five historical Senate page keys from pre-ledger releases whose pages no longer belong to any meeting carry reviewed status unresolved in model/registries/historical-witness-keys.json.
 
 | Field | Published type | Nullable | Meaning |
 | --- | --- | --- | --- |
@@ -369,10 +415,74 @@ Coverage: Derived from earlier bodies the lake still holds, not from earlier rel
 
 Nullability: witness_key is set exactly when status is unambiguous; basis is null exactly when status is unresolved (ct-kb4w). A required column is refused at write time.
 
-- `old_key`: Disjoint from witnesses.witness_key. A re-fetched body, a newly bound capture context, or a meeting link that moves a print or Senate page off its package or page occasion gives each witness a new key (witness-occurrence-v2 is unchanged); the earlier keys are listed here. A name alone never maps (ct-30fp).
+- `old_key`: Disjoint from witnesses.witness_key. Carried witness keys stay in witnesses.parquet across re-fetches and parser splits; only edited names (locator), ambiguous multiplicity changes, carried 1-hop ledger entries, and reviewed historical Senate keys enter witness_key_map (ct-46f3). Any unmapped live key refuses export (lost_witness_keys). A name alone never maps (ct-30fp).
 - `witness_key`: The successor can itself be superseded_by a higher-ranked row of the same person; follow witnesses.superseded_by to the row to show.
 
 Outgoing: `witness_key_map_successor`, `witness_key_map_candidates`.
+
+Incoming: none.
+
+## `people` — Hearing people grouped across appearances
+
+One Member of Congress (by Bioguide) or one non-Member witness group sharing normalized name and full normalized organization under middle-initial and suffix guards (or one singleton appearance).
+
+Identity: `person_key` (primary_key; published identifier).
+
+Coverage: Non-Members merge only on exact normalized name plus full normalized organization with middle-initial and suffix guards; career moves across employers, sub-unit vs parent agency variants, and appearances with empty organizations remain separate person rows until reviewed cross-employer evidence ships.
+
+| Field | Published type | Nullable | Meaning |
+| --- | --- | --- | --- |
+| `person_key` | `string` | no | Published person identifier: Bioguide ID for Members; lowercase 16-hex SHA-256 prefix over ["person-v1", name_key, org_key, middle, suffix] for grouped non-Members or ["person-singleton-v1", witness_key] when organization is empty or name is unusable |
+| `bioguide_id` | `string` | yes | Bioguide identifier in members.parquet when grouping_basis is bioguide; null otherwise |
+| `name` | `string` | no | Primary display name from the person's most recent canonical appearance |
+| `rank` | `string` | yes | Primary military or uniformed-service rank from the person's most recent canonical appearance stating one; null when none is stated |
+| `ranks` | `list<string>` | no | Distinct non-empty stated military or uniformed-service ranks across the person's canonical appearances, sorted |
+| `credentials` | `string` | yes | Primary post-nominal credentials from the person's most recent canonical appearance stating any; null when none are stated |
+| `name_variants` | `list<string>` | no | Distinct stated names across the person's canonical appearances, sorted |
+| `organization` | `string` | yes | Primary stated organization from the person's most recent canonical appearance naming one; null when none is stated |
+| `organizations` | `list<string>` | no | Distinct non-empty stated organizations across the person's canonical appearances, sorted |
+| `positions` | `list<string>` | no | Distinct non-empty stated titles/positions across the person's canonical appearances, sorted |
+| `grouping_basis` | `dict` | no | How the person's appearances were grouped: bioguide, name_organization, singleton, or reviewed |
+| `appearance_count` | `int32` | no | Count of canonical (superseded_by IS NULL) appearances belonging to this person |
+| `hearing_count` | `int32` | no | Count of distinct hearing occasions across canonical appearances belonging to this person |
+| `first_seen_date` | `date32` | yes | Earliest hearing date across canonical appearances; null when every appearance is undated |
+| `last_seen_date` | `date32` | yes | Latest hearing date across canonical appearances; null when every appearance is undated |
+| `witness_keys` | `list<string>` | no | Sorted canonical witness_key values belonging to this person |
+
+Nullability: person_key, name, grouping_basis, counts, and list columns are required; bioguide_id, rank, credentials, organization, and date bounds are nullable. A required column is refused at write time.
+
+- `ranks[]`: Stated military or uniformed-service rank strings from hearing records; values, not keys.
+- `name_variants[]`: Stated display strings from hearing records; values, not keys.
+- `organizations[]`: Stated organization strings from hearing records; values, not keys.
+- `positions[]`: Stated position/title strings from hearing records; values, not keys.
+- `witness_keys[]`: Canonical witness_key references into witnesses.parquet; superseded witness rows also carry person_key on witnesses.parquet.
+
+Outgoing: `person_member`, `person_witnesses`.
+
+Incoming: `witness_person`, `person_alias_target`, `person_alias_candidates`.
+
+## `person_aliases` — Retired person_key redirects and split notices
+
+One previously published person_key not in people.parquet, carried one hop per release.
+
+Identity: `old_person_key` (primary_key; published identifier).
+
+| Field | Published type | Nullable | Meaning |
+| --- | --- | --- | --- |
+| `old_person_key` | `string` | no | A previously published person_key no longer present in people.parquet |
+| `person_key` | `string` | yes | Current people.person_key when status is unambiguous; null when status is ambiguous or unresolved |
+| `status` | `dict` | no | unambiguous (one successor), ambiguous (split across candidate_keys, none chosen), or unresolved (no current person row) |
+| `kind` | `dict` | yes | Transition kind: regrouped, merged, split, or hidden; null when status is unresolved |
+| `decision_id` | `string` | yes | Identifier of the reviewed decision in model/registries/person-decisions.json when applicable; null for rule-driven transitions |
+| `last_release_id` | `string` | yes | Release SHA-256 of the last published release in which old_person_key appeared in people.parquet |
+| `candidate_keys` | `list<string>` | no | Sorted current people.person_key values when status is ambiguous; empty otherwise |
+
+Nullability: person_key is set exactly when status is unambiguous; kind is null exactly when status is unresolved; candidate_keys has two or more entries exactly when status is ambiguous. A required column is refused at write time.
+
+- `old_person_key`: Disjoint from people.person_key; a key published again leaves person_aliases. Any vanished prior person_key absent from both people and person_aliases refuses export (lost_person_keys).
+- `candidate_keys[]`: Current people.person_key values when status is ambiguous; empty otherwise.
+
+Outgoing: `person_alias_target`, `person_alias_candidates`.
 
 Incoming: none.
 
@@ -387,6 +497,7 @@ Identity: `video_key` (primary_key; published identifier).
 | `video_key` | `string` | no | Provider-prefixed recording identifier |
 | `event_ids` | `list<int64>` | no | Sorted meeting event IDs associated with this recording |
 | `tracks` | `list<struct<body fixed[32],suffix dict,format dict,language dict,production dict>>` | no | Captured caption, subtitle, and playlist tracks from their latest good fetch |
+| `recording_scope` | `dict` | no | full, excerpt or unknown |
 
 Nullability: Nullability transcribes the phase-2 annex §3 file table (docs/plans/phase-2-annex-20261028.md): a type without "nullable" there is required. A required column is refused at write time.
 
@@ -471,7 +582,7 @@ Nullability: Nullability transcribes the phase-2 annex §3 file table (docs/plan
 
 Outgoing: `member_lis`, `member_opensecrets`, `member_govtrack`, `member_icpsr`, `member_wikidata`, `member_fec`.
 
-Incoming: `document_members`, `witness_member`, `roster_member`, `bill_sponsor`, `amendment_sponsor`, `committee_record_sponsor`, `ballot_member`.
+Incoming: `document_members`, `witness_member`, `witness_matched_member`, `person_member`, `roster_member`, `bill_sponsor`, `amendment_sponsor`, `committee_record_sponsor`, `ballot_member`.
 
 ## `rosters` — Committee and subcommittee seats across published Congresses
 
@@ -493,10 +604,10 @@ Coverage: Printed directory entries that are not seats (vacancies, party organiz
 | `system_code` | `dict` | no | Lowercase committee or subcommittee system code |
 | `bioguide_id` | `dict` | no | Assigned member Bioguide identifier |
 | `title` | `dict` | yes | Committee leadership or seat position title |
-| `rank` | `int16` | yes | Numeric party rank on the committee |
+| `rank` | `int16` | yes | Numeric party rank on the committee when printed by the source |
 | `party` | `dict` | yes | Party caucus for the committee assignment |
 | `congress_basis` | `dict` | yes | Where the seat's Congress comes from: file (the House roster file states it), caller (the Senate file states none), directory (a Congressional Directory edition's package metadata) or directory-manual (a reviewed one-off reading of an edition's PDF) |
-| `edition_date` | `date32` | yes | For a directory seat, the edition's dateIssued: the date the printed roster describes |
+| `edition_date` | `date32` | yes | Snapshot date the roster describes: a directory edition's dateIssued, or an archived chamber file's Internet Archive capture date |
 | `source_granule` | `string` | yes | The GovInfo directory granule (or, for a manual reading, package; for an archived chamber file, its Internet Archive URL) that states the seat |
 | `source_line` | `string` | yes | The granule text line where the printed entry starts; for a manual reading, PDF page:line |
 | `position_basis` | `dict` | yes | For a directory seat with a title: printed, or inferred for a Ranking Member taken from print position (the first minority-column entry) |
@@ -507,7 +618,7 @@ Nullability: Nullability transcribes the phase-2 annex §3 file table (docs/plan
 
 - `congress`: Keyed by (congress, system_code, bioguide_id); populated from the pinned upstream committee_assignments snapshot, whose populated Congresses the coverage congress_start and congress_end bound. Earlier Congresses appear only after an upstream backfill is pinned.
 - `party`: Preserves the supplied assignment party; missing or blank values stay null. Service-term party assertions do not establish party or caucus at a roster observation, and the input does not supply qualified dated affiliation history.
-- `congress_basis`: Earlier Congresses' seats come from one Congressional Directory edition per Congress (directory). A Congress whose edition serves no committee granules combines a reviewed reading of the edition's PDF (directory-manual) with Internet Archive captures of the House file (file) and the Senate file (caller); a seat both list is the chamber file's. The current Congress comes from the current chamber files.
+- `congress_basis`: Earlier Congresses' seats come from one Congressional Directory edition per Congress (directory). A Congress whose edition serves no committee granules takes each committee from Internet Archive captures of the House file (file) and the Senate file (caller) when present, and falls back to a reviewed reading of the edition's PDF (directory-manual) for committees and subcommittees absent from those files. The current Congress comes from the current chamber files.
 - `title`: Chamber-file titles are verbatim (Chairman, Ranking Member); directory titles are normalized (Chair, Vice Chair, Ranking Member).
 - `system_code`: hsba00-tf-terrorism-financing is directory-defined: that House Financial Services task force has no Congress.gov code; its committees row is synthesized with parent hsba00.
 
@@ -610,10 +721,13 @@ Identity: `requested_url` (primary_key; published identifier).
 | `last_outcome` | `dict` | yes | Latest attempt outcome |
 | `last_good_at` | `timestamp<microsecond,UTC>` | yes | Latest good fetch time |
 | `next_attempt_at` | `timestamp<microsecond,UTC>` | yes | Next scheduled fetch time |
+| `recheck_meeting_date` | `date32` | yes | Meeting date the recheck band was aged against: the address's earliest linked meeting, else the date in its docs.house.gov /meetings/ path; null when neither is known (the family's shortest band applies) and on a queued row |
+| `linked_from` | `list<fixed[8]>` | no | Every read page that links a queued address, as page keys (the first 8 bytes of the page body's SHA-256, the link-key form) in key order; empty on an address with attempts |
 
 Nullability: Nullability transcribes data model §7.7. A required column is refused at write time.
 
 - `requested_url`: Exact scheduled address. Missing success is not missing publication; this is operational capture state, not an entity or document catalogue.
+- `linked_from`: A page key resolves in links.parquet only when the page is itself a listed document; wrapper and listing pages are kept as evidence, not listed. Published, with recheck_meeting_date, so the release gate can trace a scheduling change to the receipts that caused it (ct-9j3z).
 
 Outgoing: `capture_request_address`.
 
@@ -712,9 +826,9 @@ Coverage: Historical package matcher scores are available separately when histor
 | `package_id` | `string` | yes | GPO package subject |
 | `video_key` | `string` | yes | Video identity; can lack a video row |
 | `url` | `string` | yes | Off-channel recording URL |
-| `basis` | `dict` | no | publisher_link, video_states_event_id or curated |
+| `basis` | `dict` | no | publisher_link, committee_page, video_states_event_id or curated |
 | `decision` | `dict` | yes | The verdict as stated, or linked |
-| `score` | `int16` | yes | 100 publisher link, 95 stated event ID; null otherwise |
+| `score` | `int16` | yes | 100 publisher or committee-page link, 95 stated event ID; null otherwise |
 | `recording_scope` | `dict` | yes | full, excerpt or unknown |
 | `status` | `dict` | no | asserted, claimed, decided, conflicting or unresolved; unresolved is a negative verdict that old matcher evidence disputes |
 | `note` | `string` | yes | Curator note, or the unmatched stated number |
@@ -807,7 +921,7 @@ Identity: `event_id, aspect` (primary_key; published identifier).
 | `state` | `dict` | no | present, partial, claimed, empty, not_stated, unresolved, not_public, confirmed_absent or unknown; these never merge |
 | `basis` | `dict` | no | Which relation states it |
 | `count` | `int32` | no | Rows behind present |
-| `reason` | `dict` | yes | Why a state holds, when known: recording_decision_unresolved_or_conflicting, package_context_only, video_text_only, excerpts_only, stated_documents_not_held, senate_page_links_pending, package_witnesses_unattached, package_names_meeting_unlinked, recording_link_pending or recording_without_video_record; for a present transcript, the sources held (printed_hearing, committee_transcript, captions) |
+| `reason` | `dict` | yes | Why a state holds, when known: recording_decision_unresolved_or_conflicting, package_context_only, video_text_only, excerpts_only, stated_documents_not_held, senate_page_links_pending, package_witnesses_unattached, member_appearances_only (empty: the people the meeting lists, on its own list or, tied to no meeting, on a print it links, are Members of Congress, perhaps with record entries, and no outside witness), nominee_not_listed (unknown: a nomination hearing whose list names only Members, so its nominee is missing), package_names_meeting_unlinked, recording_link_pending or recording_without_video_record; for a present transcript, the sources held (printed_hearing, committee_transcript, captions) |
 
 Nullability: The documents are silent; entity-meeting-coverage.sql always sets basis (a CASE with an else) and count (coalesced), so both are required; reason is stated only when known. A required column is refused at write time.
 
@@ -1073,9 +1187,45 @@ many-to-many; match: `equal`; nullable: true; resolution: `unresolved_allowed`. 
 
 ### `witness_member`
 
-`witnesses.bioguide_id` → `members.bioguide_id`. Published Bioguide identification of a witness who is a member; never infer by name.
+`witnesses.bioguide_id` → `members.bioguide_id`. Bioguide identification the publisher states for a witness (house_xml); bioguide_id is never inferred. A name-matched Member is a different relationship, witness_matched_member.
 
 many-to-one; match: `equal`; nullable: true; resolution: `unresolved_allowed`. Scope: selected release.
+
+### `witness_matched_member`
+
+`witnesses.matched_bioguide_id` → `members.bioguide_id`. The sitting Member of Congress a member_appearance row (or a committee member's own opening statement, member_statement) is, as the archive matched it: the publisher's Bioguide ID, or inferred from a term covering the hearing date and the row's own words: its last and first name (the members data's own nickname counts) with its state, chamber or committee role, a House seat it states and the holder's family name, a bare initial only one sitting Member in the stated chamber and state shares, or a name alone at a Member Day hearing (match_basis says which). Inferred matches are labelled name-matched; a name several sitting Members fit stays unmatched.
+
+many-to-one; match: `equal`; nullable: true; resolution: `required`. Scope: selected release.
+
+### `witness_person`
+
+`witnesses.person_key` → `people.person_key`. Person grouping for eligible witness appearances (Members by Bioguide; non-Members by normalized name and full normalized organization under middle-initial and suffix guards, or singleton fallback); inherited across superseded_by.
+
+many-to-one; match: `equal`; nullable: true; resolution: `required`. Scope: selected release.
+
+### `person_member`
+
+`people.bioguide_id` → `members.bioguide_id`. Member of Congress record when a person row is grouped by Bioguide ID.
+
+one-to-one; match: `equal`; nullable: true; resolution: `required`. Scope: selected release.
+
+### `person_witnesses`
+
+`people.witness_keys[]` → `witnesses.witness_key`. Canonical (superseded_by IS NULL) witness appearance rows belonging to this person.
+
+many-to-many; match: `equal`; nullable: false; resolution: `required`. Scope: selected release.
+
+### `person_alias_target`
+
+`person_aliases.person_key` → `people.person_key`. Current person row a retired person_key resolves to when status is unambiguous.
+
+many-to-one; match: `equal`; nullable: true; resolution: `required`. Scope: selected release.
+
+### `person_alias_candidates`
+
+`person_aliases.candidate_keys[]` → `people.person_key`. Candidate current person rows when a retired person_key split ambiguously.
+
+many-to-many; match: `equal`; nullable: false; resolution: `required`. Scope: selected release.
 
 ### `committee_parent`
 
@@ -1559,6 +1709,25 @@ No row: the key is unknown, or witness_key_map states it ambiguous (candidate_ke
 
 Never resolves by name.
 
+### `member_appearances` — Hearings where a Member of Congress appeared as a Member
+
+Requires: `witnesses`, `members`.
+
+Result: One shown Member appearance of this Member.
+
+Parameters, in order: `bioguide_id` (example `A000001`).
+
+```sql
+SELECT w.matched_bioguide_id,m.name AS member,w.witness_key,w.occasion,w.event_id,w.package_id,w.name,w.position,
+  w.match_basis,w.match_basis<>'publisher_id' AS name_matched
+FROM witnesses w LEFT JOIN members m ON m.bioguide_id=w.matched_bioguide_id
+WHERE w.matched_bioguide_id=? AND w.superseded_by IS NULL ORDER BY w.event_id NULLS LAST,w.package_id,w.witness_key LIMIT 100
+```
+
+name_matched rows were identified by name and term dates, not by the publisher; bioguide_id stays the publisher's alone.
+
+A Member whose rows name no state, chamber or role, or share a name with another sitting Member, is not listed.
+
 ### `committee_roster` — Committee members for a published Congress
 
 Requires: `rosters`, `committees`, `members`.
@@ -1570,7 +1739,7 @@ Parameters, in order: `system_code` (example `hsif00`), `congress` (example `119
 ```sql
 SELECT r.congress,r.system_code,c.name AS committee,r.bioguide_id,m.name,r.title,r.rank,r.party
 FROM rosters r LEFT JOIN committees c USING (system_code) LEFT JOIN members m USING (bioguide_id)
-WHERE r.system_code=? AND r.congress=? ORDER BY r.rank,r.bioguide_id LIMIT 100
+WHERE r.system_code=? AND r.congress=? ORDER BY r.rank,r.title IS NULL,r.bioguide_id LIMIT 100
 ```
 
 An empty historical result does not establish that the committee had no members.

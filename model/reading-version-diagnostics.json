@@ -1,4 +1,20 @@
 {
+  "house_floor_feed": {
+    "limits": {
+      "decoded_bytes": 67108864,
+      "stored_bytes": 67108864
+    },
+    "locked_sha256": "3c5f5007a8c8195d9fdf3d7a9f8ea441d6872da5af199e7b8468035fa22f588e",
+    "policy": {
+      "max_input_bytes": 65536,
+      "max_output_bytes": 67108864,
+      "memory_bytes": 1073741824,
+      "timeout_seconds": 60
+    },
+    "sample_sha256": "46bc2a46f047467f52eb8b3b214865dec57569c0ac107f0204c4515ef34df84e",
+    "version": "b08fb4d8577bb72a97a0b6624eac8d1d21cee01a2db42184e8f7d38c80423a8f",
+    "workspace_sha256": "e26ea7e3611657cdd12b8021f72326ae58aa4ca16b4ba6e16e696d57ea090ce2"
+  },
   "html": {
     "limits": {
       "decoded_bytes": 67108864,
@@ -8,7 +24,7 @@
     "locked_sha256": "6070d77413a75da8f622ee36fcbfffea84831739338bbbab56484b95cebf9762",
     "sample_sha256": "1f7918d00ea4860c20b2dc8a4bccdf4ef0b646505763cc54c784091e6701b74e",
     "version": "61d7904883f042f48d3732d0518adaa5cf5084790ebc9d5411aad7a6ab605969",
-    "workspace_sha256": "46ababf171c0419255dfe19fc996d8a3a6313aedd15626b4398680690c5d6fbe"
+    "workspace_sha256": "def78191f828ba6b3880acc316c941d265d45b4e40803437814ccefd208274e2"
   },
   "html_metadata": {
     "format_timeout_seconds": 10.0,
@@ -34,29 +50,29 @@
     },
     "sample_sha256": "d6b9359912cac669da66673017cb13451b9d54fc795e7608e29068655be617a5",
     "version": "0fff8151c7752109cc3778d9570e682985edce2e1f90e04c3b638c37a6c4a129",
-    "workspace_sha256": "cad6f03a9a7e9c527e861dc23ce7f0ea4bdb95e5fb9ec08acba7dd2994f652a5"
+    "workspace_sha256": "fa1abed99538f8e8f5ade6f92cb5083510f630afb549d517070fcd6a892cdfcf"
   },
   "html_text": {
     "limits": {
       "decoded_bytes": 67108864,
       "stored_bytes": 67108864
     },
-    "locked_sha256": "66fe925c21d445b317174df119ba5d423db8444ab43b09faf8e88bef50ae7dca",
+    "locked_sha256": "0fcfcb304f557b7ca27fc199db4be869eb403ef8d9e6dce7f9d70654df71b329",
     "page_deadline_seconds": 60,
     "policy": {
       "max_input_bytes": 65536,
       "max_output_bytes": 8388608,
-      "memory_bytes": 1073741824,
+      "memory_bytes": 2147483648,
       "timeout_seconds": 1800
     },
-    "sample_sha256": "b60e6a549af0d96615d78f8a076d8f71862b79f37b4f18167406613da66d124f",
+    "sample_sha256": "526687503c9d0a8c475f168a1bc11317ac005114fbfde62eebf18d759d0c6411",
     "spicy_docs": {
-      "derivation": "003",
-      "digest": "sha256:bc0f8aad8391e4625f74674ae81f1c8295c8877242efc5be6758559c3280aecc",
-      "version": "0.79.0+body.text.f20f38dc"
+      "derivation": "007+ctreaders.20261113",
+      "digest": "sha256:32d10c89125e491f699bb8ce43f094fdeebbb5f5a0e5c267801b4ae7f7194a89",
+      "version": "0.85.0+sourcequality.20261115"
     },
-    "version": "00994d3df2a6f0fba27827ed098c7b17204132e45a19c77b1b10260c2321bdf4",
-    "workspace_sha256": "65c97f45520695bea53cd2d30583aaebe7c62a0a988a78ab40449bc2441659d3"
+    "version": "f1cefe442182dc8e4c456359aebdb37e5c50db6b0abb669b303e05763feb94a3",
+    "workspace_sha256": "6caef71e0d0399da06bb59139a792a2134cb6813826c359393df752d46182b47"
   },
   "json": {
     "limits": {
@@ -67,14 +83,14 @@
     "locked_sha256": "6070d77413a75da8f622ee36fcbfffea84831739338bbbab56484b95cebf9762",
     "sample_sha256": "29b6bd375201fffc4d4aa59db3b1e661d36ad63b94889649396b21b18af92f7c",
     "version": "f8d98b4305d8b85bdb6323b91ca56c9c01e0ffd3234ed89d9d90afadc37cae93",
-    "workspace_sha256": "46ababf171c0419255dfe19fc996d8a3a6313aedd15626b4398680690c5d6fbe"
+    "workspace_sha256": "def78191f828ba6b3880acc316c941d265d45b4e40803437814ccefd208274e2"
   },
   "pdf_text": {
     "limits": {
       "decoded_bytes": 67108864,
       "stored_bytes": 67108864
     },
-    "locked_sha256": "66fe925c21d445b317174df119ba5d423db8444ab43b09faf8e88bef50ae7dca",
+    "locked_sha256": "0fcfcb304f557b7ca27fc199db4be869eb403ef8d9e6dce7f9d70654df71b329",
     "macos_build": "25G5057c",
     "ocr_rule": {
       "bands": 3,
@@ -90,18 +106,18 @@
     "policy": {
       "max_input_bytes": 65536,
       "max_output_bytes": 8388608,
-      "memory_bytes": 1073741824,
+      "memory_bytes": 2147483648,
       "timeout_seconds": 1800
     },
     "pymupdf": "1.28.2",
-    "sample_sha256": "7f791be470e94b701aa4412bfd995b9257803eee33262bc8634251aea5ff25cc",
+    "sample_sha256": "df43e60b0033473753db33b675c4d5fd2f94405374833c9ae1fd7705a7ce3f6f",
     "spicy_docs": {
-      "derivation": "003",
-      "digest": "sha256:bc0f8aad8391e4625f74674ae81f1c8295c8877242efc5be6758559c3280aecc",
-      "version": "0.79.0+body.text.f20f38dc"
+      "derivation": "007+ctreaders.20261113",
+      "digest": "sha256:32d10c89125e491f699bb8ce43f094fdeebbb5f5a0e5c267801b4ae7f7194a89",
+      "version": "0.85.0+sourcequality.20261115"
     },
-    "version": "2980a4db41cbe1f559532557c5ad59f86691527c2569e8b3746c9d32c6f8fdfd",
-    "workspace_sha256": "65c97f45520695bea53cd2d30583aaebe7c62a0a988a78ab40449bc2441659d3"
+    "version": "4d04558965d9baf630033c94857169bfddad68988fce34041a4a35a0c6ddd2a8",
+    "workspace_sha256": "6caef71e0d0399da06bb59139a792a2134cb6813826c359393df752d46182b47"
   },
   "readings": {
     "limits": {
@@ -109,7 +125,7 @@
       "page_parse_bytes": 25165824,
       "stored_bytes": 67108864
     },
-    "locked_sha256": "0e7b77aac9057cefc2f19dc15b71c9dfde7b3e4f3e5b88c72a86ffa304d55280",
+    "locked_sha256": "a071f55862f23d586775b69133822ad263f5a8aed83c2077448d3def86e12b21",
     "policy": {
       "max_input_bytes": 65536,
       "max_output_bytes": 8388608,
@@ -118,10 +134,10 @@
     },
     "sample_sha256": "475a2288edeaf9a7dc8e8c91be51524729eeb54b750bb99d28ebb81996393982",
     "version": "7b006df14ea065d7bab8c15a319c9201c57d4547c174d722651a33107dbd73ed",
-    "workspace_sha256": "19617f10a7ace8ee7ef636a04a8a3ad7ed9ce2a21f593b2e419304025648a2fb"
+    "workspace_sha256": "49d313694f23c297d896c34178c6a50d4e5daf18684d2d118cddef10d641632c"
   },
   "sniff": {
-    "locked_sha256": "4712044f1e68920433b7352425e350d3e301037e7ddf2b0943378193d7d35dec",
+    "locked_sha256": "8d24595591a79984bb7ba208d33396d57c31b23817b844bb0e7c1361e25e746b",
     "readers": {
       "pdfinfo": "pdfinfo version 26.10.0",
       "pdftotext": "pdftotext version 26.10.0",
@@ -129,41 +145,7 @@
     },
     "sample_sha256": "a65c8c35474262329806ea3ebcc90e962c6df3aecf509ab9246f599253bb8357",
     "version": "01bf09000fce8229a468583c23f869fc639c56e3e87a1ca447dd66c5f99bff6b",
-    "workspace_sha256": "b38dc054a24955e4515774f92a76d20d92cfec8fddf6c7b667ff9e4ebbd0888c"
-  },
-  "warc": {
-    "limits": {
-      "decoded_bytes": 67108864,
-      "stored_bytes": 67108864
-    },
-    "locked_sha256": "66fe925c21d445b317174df119ba5d423db8444ab43b09faf8e88bef50ae7dca",
-    "macos_build": "25G5057c",
-    "ocr_rule": {
-      "bands": 3,
-      "default_strategy": "congress_api.parsers.body_text:native_only",
-      "dpi": 200,
-      "engine_strategy": "congress_api.parsers.body_text:apple_vision",
-      "garble": "spicy_docs.extraction.api.control_characters",
-      "min_chars": 50,
-      "normalize": "congress_api.parsers.body_text.gpo_page",
-      "require_images": true
-    },
-    "page_deadline_seconds": 60,
-    "policy": {
-      "max_input_bytes": 65536,
-      "max_output_bytes": 8388608,
-      "memory_bytes": 1073741824,
-      "timeout_seconds": 1800
-    },
-    "pymupdf": "1.28.2",
-    "sample_sha256": "5e5334e9e4f88a1bce6d31860199894fa12f83d65b7f167dc9dbd389c9f9423a",
-    "spicy_docs": {
-      "derivation": "003",
-      "digest": "sha256:bc0f8aad8391e4625f74674ae81f1c8295c8877242efc5be6758559c3280aecc",
-      "version": "0.79.0+body.text.f20f38dc"
-    },
-    "version": "97738b4229e0d064bc9c90aed181d05c4ecb1c4be0775dbdee077d7b6e60c9cb",
-    "workspace_sha256": "65c97f45520695bea53cd2d30583aaebe7c62a0a988a78ab40449bc2441659d3"
+    "workspace_sha256": "58716d2c65c8881fd3a803d241f791bcd31352d2d1c056ffbb180f7a6304868c"
   },
   "xml": {
     "limits": {
@@ -174,28 +156,28 @@
     "locked_sha256": "6070d77413a75da8f622ee36fcbfffea84831739338bbbab56484b95cebf9762",
     "sample_sha256": "25f05b499749df71b38a9edb58dd249a89e5cf9e85dfb93d1f0e82778ab88c4e",
     "version": "c9d955b28b401a3fe56386a4a221b3f2147baa0f1da503c7c6a224f4808d085f",
-    "workspace_sha256": "46ababf171c0419255dfe19fc996d8a3a6313aedd15626b4398680690c5d6fbe"
+    "workspace_sha256": "def78191f828ba6b3880acc316c941d265d45b4e40803437814ccefd208274e2"
   },
   "xml_text": {
     "limits": {
       "decoded_bytes": 67108864,
       "stored_bytes": 67108864
     },
-    "locked_sha256": "66fe925c21d445b317174df119ba5d423db8444ab43b09faf8e88bef50ae7dca",
+    "locked_sha256": "0fcfcb304f557b7ca27fc199db4be869eb403ef8d9e6dce7f9d70654df71b329",
     "page_deadline_seconds": 60,
     "policy": {
       "max_input_bytes": 65536,
       "max_output_bytes": 8388608,
-      "memory_bytes": 1073741824,
+      "memory_bytes": 2147483648,
       "timeout_seconds": 1800
     },
-    "sample_sha256": "c97558482f050dcc25737267a2e0053310bd8e477646335934420c5694b924b7",
+    "sample_sha256": "6398303fd71602e2f2cb7a8931354a47da67ceb0eed8e57de09099601310fb59",
     "spicy_docs": {
-      "derivation": "003",
-      "digest": "sha256:bc0f8aad8391e4625f74674ae81f1c8295c8877242efc5be6758559c3280aecc",
-      "version": "0.79.0+body.text.f20f38dc"
+      "derivation": "007+ctreaders.20261113",
+      "digest": "sha256:32d10c89125e491f699bb8ce43f094fdeebbb5f5a0e5c267801b4ae7f7194a89",
+      "version": "0.85.0+sourcequality.20261115"
     },
-    "version": "ed9eb0e2908729e728b02380f50ae994e395a03da5ae50caa21c9e80d378a6db",
-    "workspace_sha256": "65c97f45520695bea53cd2d30583aaebe7c62a0a988a78ab40449bc2441659d3"
+    "version": "5a0768bcbaaaf7f67e29e2ff989689b62356579780f99e518d137f7b222c798c",
+    "workspace_sha256": "6caef71e0d0399da06bb59139a792a2134cb6813826c359393df752d46182b47"
   }
 }

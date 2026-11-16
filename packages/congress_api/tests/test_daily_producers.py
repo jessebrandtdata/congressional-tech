@@ -27,7 +27,7 @@ def spec(root):
 
 class NeverNative:
     remote=None
-    def run_job(self,path):raise AssertionError('Native job before validation')
+    def run_job(self,path,log=None):raise AssertionError('Native job before validation')
 
 
 @pytest.mark.parametrize('budget',[None,True,False,0,-1,1.5,'10'])
@@ -61,7 +61,7 @@ def test_daily_preflights_all_heads_without_creating_a_missing_table(tmp_path):
     jobs=[]
     class MissingNative:
         remote=None
-        def run_job(self,path):
+        def run_job(self,path,log=None):
             job=json.loads(path.read_text());jobs.append(job)
             return dict(table_operations=[dict(name=n,kind='resolve',exists=False) for n in TABLES])
     with pytest.raises(ValueError,match='table does not exist'):
@@ -77,7 +77,7 @@ def test_complete_receipt_identity_reads_the_final_native_pin_only(tmp_path):
     from congress_api.lake.daily import _complete_receipt_keys
     pin=dict(metadata_location='file:///fixed.metadata.json',table_uuid='a'*32,snapshot=7,schema_id=0)
     class Native:
-        def run_job(self,path):
+        def run_job(self,path,log=None):
             job=json.loads(path.read_text())
             assert job['inputs']==[dict(name='current_captures',kind='native_table',**pin)]
             assert job['outputs']==[]
@@ -397,7 +397,7 @@ def test_native_daily_refuses_captures_committed_after_its_parser_work(tmp_path)
     manifest=json.loads((staged/'ingested-receipts.json').read_text())
     class ConcurrentNative:
         def __getattr__(self,name):return getattr(engine,name)
-        def run_job(self,path):
+        def run_job(self,path,log=None):
             if path.parent.name=='final-heads':
                 tables.append_rows(staged/'captures.parquet',engine=engine,
                     work=tmp_path/'late-append',catalog_root=value['catalog_root'],
@@ -594,7 +594,7 @@ def test_inline_saved_record_and_govinfo_mods_staging_with_anti_join(tmp_path):
             local_root=raw,raw_store=store,decided_at=STAMP,unreadable_store=store)
         assert a_stage['work_items']==1 and a_stage['produced']==1
         a_rows=pq.read_table(a_stage['records']).to_pylist()
-        assert len(a_rows)==1 and a_rows[0]['appearances'][0]['name']=='Dr. Inline Witness'
+        assert len(a_rows)==1 and a_rows[0]['appearances'][0]['name']=='Inline Witness' and a_rows[0]['appearances'][0]['honorific']=='Dr.'
         a_stage2=appearance_records.stage(captures=cap_stage,readings=empty_readings(tmp_path/"readings"),existing=a_stage['records'],engine=eng,
             work=tmp_path/'a2',local_root=raw,raw_store=store,decided_at=STAMP,unreadable_store=store)
         assert a_stage2['work_items']==0 and a_stage2['produced']==0
@@ -694,3 +694,73 @@ def test_daily_derived_scope_refuses_before_effects(tmp_path,change):
     with pytest.raises(ValueError,match='scope|stored_bytes|batch_size'):
         daily.produce_daily(value,engine=NeverNative(),raw_store=BodyStore(LocalAdapter(tmp_path/'durable')))
     assert not (tmp_path/'work').exists() and not (tmp_path/'durable').exists()
+
+
+def test_daily_runs_full_readings_scan_once_and_shares_routed_xml_readings(tmp_path):
+    """ct-6p6d: full pending_bodies/settled_parsers scan runs once per night; routed xml readings scan once."""
+    from congress_api.lake import appearance_records, meeting_records
+    from congress_api.lake.daily import ALL_TABLE_NAMES, produce_daily
+    from test_daily_raw_listing import fixture as r2_fixture
+
+    detail_a = json.dumps({
+        'committeeMeeting': {
+            'eventId': '115538', 'congress': 118, 'chamber': 'House', 'title': 'Hearing A',
+            'date': '2024-07-09T14:00:00Z',
+            'committees': [{'systemCode': 'hsju00', 'name': 'Judiciary', 'chamber': 'House'}],
+            'witnesses': [{'name': 'Dr. Jane Doe', 'organization': 'ACME'}],
+        }
+    }).encode()
+    detail_b = json.dumps({
+        'committeeMeeting': {
+            'eventId': '115539', 'congress': 118, 'chamber': 'House', 'title': 'Hearing B',
+            'date': '2024-07-10T14:00:00Z',
+            'committees': [{'systemCode': 'hsju00', 'name': 'Judiciary', 'chamber': 'House'}],
+            'witnesses': [{'name': 'Dr. John Roe', 'organization': 'ACME'}],
+        }
+    }).encode()
+    value, engine, _bucket, store = r2_fixture(tmp_path, [detail_a, detail_b])
+    five_tables = {name: dict(namespace=['archive'], name=name) for name in ALL_TABLE_NAMES}
+    meeting_records.create_table(engine=engine, work=tmp_path / 'create-meetings',
+        catalog_root=value['catalog_root'], table=five_tables['meeting_records'], location=tmp_path / 'lake-meetings')
+    appearance_records.create_table(engine=engine, work=tmp_path / 'create-appearances',
+        catalog_root=value['catalog_root'], table=five_tables['appearance_records'], location=tmp_path / 'lake-appearances')
+    value['tables'] = five_tables
+    receipts = value['receipt_inventory']
+
+    # Seed first receipt so heads['captures'] and heads['readings'] hold settled rows.
+    seeded = produce_daily(dict(value, receipt_inventory=receipts[:1], work=str(tmp_path / 'seed')),
+        engine=engine, raw_store=store)
+    assert seeded['status'] == 'completed'
+
+    recorded = []
+
+    class RecordingNative:
+        def __getattr__(self, name):
+            return getattr(engine, name)
+
+        def run_job(self, path, log=None):
+            recorded.append((path.relative_to(tmp_path / 'run2').as_posix(), json.loads(path.read_text())))
+            return engine.run_job(path, log=log)
+
+    second = produce_daily(dict(value, work=str(tmp_path / 'run2')), engine=RecordingNative(), raw_store=store)
+    assert second['status'] == 'completed'
+    assert second['producerreports']['readings']['work_items'] == 1
+
+    # Exactly 1 job ('readings-backlog/plan/job.json') runs pending_bodies over native_table readings.
+    pending_jobs = [
+        (rel, {i['name']: i['kind'] for i in job.get('inputs', [])})
+        for rel, job in recorded
+        if any(s['name'] == 'pending_bodies' for s in job.get('steps', []))
+    ]
+    native_pending = [rel for rel, kinds in pending_jobs if kinds.get('existing') == 'native_table' or kinds.get('captures') == 'native_table']
+    assert native_pending == ['readings-backlog/plan/job.json'], pending_jobs
+
+    # Both meeting_records and appearance_records read local parquet routed readings rather than native_table readings twice.
+    cpr_jobs = [
+        (rel, {i['name']: i['kind'] for i in job.get('inputs', [])})
+        for rel, job in recorded
+        if any(s['name'] == 'current_page_readings' for s in job.get('steps', []))
+    ]
+    assert len(cpr_jobs) == 2
+    assert all(kinds.get('readings') == 'parquet' for _rel, kinds in cpr_jobs), cpr_jobs
+

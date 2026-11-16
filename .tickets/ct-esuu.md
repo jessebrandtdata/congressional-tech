@@ -1,0 +1,39 @@
+---
+id: ct-esuu
+status: closed
+deps: []
+links: [ct-fa2h, cat2-x47u, ct-jcnd, ct-lft6, ct-5q3g, ct-46f3, cat2-pkk1, ct-kt2o, ct-egoo]
+created: 2026-11-12T06:08:47Z
+type: bug
+priority: 2
+assignee: mikewolfd
+tags: [model, senate, filenames]
+---
+# Senate URLs ending in a bare UUID segment lose slug-derived filename, kind, and family
+
+When `www.energy.senate.gov` pages under `/hearings/YYYY/M/<slug>/<uuid>` were fetched at HTTP 200 in `ct-fa2h` recapture run `20261112T031832Z-f7ede707000a`, two business-meeting HTML pages whose earlier `/hearings/hearings-YYYY-M-<slug>-<uuid>/` captures carried descriptive slugs updated their primary saved capture to the `/<uuid>`-suffixed canonical-alias URL:
+
+- Live `21fc049940bb` row `296784` -> `ede659a056c0` row `26389`: `filename` changed from `hearings-2021-11-business-meeting-pending-nominations-60bdf4d2-9524-4699-9553-caf33a0da8be` to `60bdf4d2-9524-4699-9553-caf33a0da8be` (`https://www.energy.senate.gov/hearings/2021/11/business-meeting-pending-nominations/60bdf4d2-9524-4699-9553-caf33a0da8be`), dropping filename-derived `facts`, `document_kind` (`['business-meeting'] -> []`), and `document_family` (`['business-meeting'] -> []`).
+- Live `21fc049940bb` row `296805` -> `ede659a056c0` row `25643`: `filename` changed from `hearings-2021-5-nomination-business-meeting-5c20db43-6834-46b2-b92f-40c4c719a379` to `5c20db43-6834-46b2-b92f-40c4c719a379` (`https://www.energy.senate.gov/hearings/2021/5/nomination-business-meeting/5c20db43-6834-46b2-b92f-40c4c719a379`), dropping filename-derived `facts`, `document_kind` (`['business-meeting'] -> []`), and `document_family` (`['business-meeting'] -> []`).
+
+Recorded as an `accepted_defect` on `{detail,list}.parquet|changed {filename,document_kind,document_family}` and `detail.parquet|changed facts` in `model/jobs/release-causes/21fc049940bb-ede659a056c0.json`.
+
+## Acceptance Criteria
+
+- URL-derived filenames for HTML pages whose final path segment is a bare UUID (preceded by a descriptive `<slug>` segment, e.g. `/hearings/YYYY/M/<slug>/<uuid>`) retain or prefer the descriptive slug so `filename`, `facts`, `document_kind`, and `document_family` do not regress to a bare UUID.
+- Covered by unit/model regression tests on `business-meeting-pending-nominations/60bdf4d2-9524-4699-9553-caf33a0da8be` and `nomination-business-meeting/5c20db43-6834-46b2-b92f-40c4c719a379`.
+
+## Notes
+
+**2026-11-12T07:05:00Z**
+
+Fixed in `model/sql/html-uuid-slug-fills.sql` and `packages/viewer_publication/src/viewer_publication/archive_model.py` (`html_uuid_candidates` + `html_uuid_slug_fills` into `normalized`, keeping `model/sql/effective-filenames.sql` untouched so the pinned `filename_readings` `catalog_version` and producer proof stay unchanged):
+- HTML documents whose primary `base_normalized` filename is a bare UUID first take any non-UUID sibling HTML copy's `filename`, `document_kind`, `document_family`, and `facts` from `saved_files` + `source_annotations` on the same component (restoring `hearings-2021-11-business-meeting-pending-nominations-60bdf4d2-9524-4699-9553-caf33a0da8be` and `hearings-2021-5-nomination-business-meeting-5c20db43-6834-46b2-b92f-40c4c719a379` with `['business-meeting']` kind/family/facts on both `energy.senate.gov` rows when recaptured via `/<slug>/<uuid>`).
+- When no sibling non-UUID HTML copy exists, `html-uuid-slug-fills.sql` recovers the descriptive trailing-slash segment or `<slug>-<uuid>` stem from the document's URLs (`source_url` / `document_addresses`), excluding generic container path segments (`hearings`, `documents`, `files`, `services`, etc.), and derives matching event `document_kind`, `document_family`, and `facts`.
+- Verified end-to-end with `test_senate_html_urls_ending_in_bare_uuid_retain_slug_filename_kind_and_family` in `packages/viewer_publication/tests/test_phase1_document_metadata.py`, `test_producer_identities.py`, `test_archive_schema.py`, `test_phase1_model_lifetimes.py`, and `test_phase1_model_repeat_cost.py`.
+
+### Final Wave 4 Verification & Merge Closeout (2026-11-12)
+- **Code Commit:** `4a19b8cb` (`claude/ct-wave-4-model`, fast-forwarded onto `origin/main`)
+- **Hosted CI (`validate-explorer.yml`):** Run `43250539064` — **7/7 GREEN** (all 6 offline shards + Explorer bundle validation)
+- **Blind Multi-Skill Review:** Round 3 **SHIP** (`0 P0, 0 P1, 0 P2`)
+- **End-to-End 4-Hop Horizontal Verification:** Candidate release `a1a07698ef50066bf41f621751b0c83c5912e9a71e45bb7b40077d0658e44003` (`0` violations across all 36 invariants) + Playwright Chromium UI & live `ede659a056c0` comparison documented in `wave4_horizontal_e2e_trace.md`.

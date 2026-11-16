@@ -305,7 +305,7 @@ One row per `(filename, source_url, catalog_version)`: what the filename parser 
 
 Every meeting record MUST come through the raw writer like any other fetch; older Congress.gov records sit inline in receipt lines and are read there. `meeting_records` and `appearance_records` ([[PHASE-2]] §1.2–1.3) give pages a hearing's title, date, status, sittings and place, its committees and their roles, the bills, nominations and treaties it covers, its printed transcript (by GPO jacket number), its recording links, and its witnesses with what each submitted: from House witness lists, Congress.gov, Senate committee hearing pages (whose layout puts each witness's testimony in that witness's card) and the GovInfo MODS records already in raw. Every link is one a publisher states; witnesses are keyed per occasion and not yet matched across occasions.
 
-Committees, members, terms, current rosters, bills, CBO estimates, floor votes and nominations are reference inputs from spicy-regs, which keeps their raw records ([[PHASE-2]] §1.1). They are not lake tables: publish pins each family's current immutable generation (§10.3.1) and the model reads it directly. The split runs both ways: the archive owns meetings, witnesses, recordings and saved copies, and spicy-regs reads its release files, pinned by release ID, instead of capturing meetings itself (spicy-stack ss-vhi2), skipping the files whose manifest names spicy-regs as producer ([[DATA-MODEL]] §8.1). Amendments and committee activities come from spicy-regs too. Roster history and nominations before the 119th Congress wait on spicy-regs.
+Committees, members, terms, rosters, bills, CBO estimates, floor votes and nominations are reference inputs from spicy-regs, which keeps their raw records ([[PHASE-2]] §1.1). They are not lake tables: publish pins each family's current immutable generation (§10.3.1) and the model reads it directly. The split runs both ways: the archive owns meetings, witnesses, recordings and saved copies, and spicy-regs reads its release files, pinned by release ID, instead of capturing meetings itself (spicy-stack ss-vhi2), skipping the files whose manifest names spicy-regs as producer ([[DATA-MODEL]] §8.1). Amendments and committee activities come from spicy-regs too. Rosters before the 113th Congress and nominations before the 119th Congress wait on spicy-regs.
 
 ### 8.6 Maintenance
 
@@ -331,7 +331,7 @@ A file is a real document when its main content is the document itself (testimon
 
 ### 9.3 Grouping
 
-Source files connect when they share a real body, when one endpoint served re-packaged bytes with equal main text, when the publisher lists them together as formats of one document, and when a reviewer merges them. A new edition is a new document: an edition that ever shared an address with a different edition never joins a rendition group, so mirrors cannot merge editions transitively.
+Source files connect when they share a real body, when one endpoint served re-packaged bytes with equal main text, when the publisher lists them together under one name as formats of one document, and when a reviewer merges them. A new edition is a new document: an edition that ever shared an address with a different edition never joins a rendition group, so mirrors cannot merge editions transitively.
 
 Files connect through one node per body, fingerprint or rendition group, so a group of n files costs n edges, not n² (§13).
 

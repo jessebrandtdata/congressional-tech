@@ -363,6 +363,22 @@ JOB_FIELDS={'version','bucket','catalog_root','work','external_pins','tables','t
 JOB_OPTIONAL={'engine_config','external_pins_source','raw_verification','lake_maintenance'}
 
 
+def _daily_tables(value,base):
+    """The daily job owns the table list, so the committed spec names its file (ct-yndj).
+
+    A copied list drifted: ea2cf179 moved the daily to new tables and left this one naming
+    superseded generations. An explicit map remains, and lake rebuild and purge entries require
+    one (load_spec), for a one-off spec whose targets the daily does not write, such as a
+    superseded generation to purge.
+    """
+    from viewer_publication.archive_model_job import _local
+    if not isinstance(value,str):return value
+    daily=json.loads(Path(_local(value,base)).read_text(encoding='utf-8'))
+    if not isinstance(daily,dict) or 'tables' not in daily:
+        raise ValueError('Maintenance tables must name a daily job spec that lists its tables')
+    return daily['tables']
+
+
 def load_spec(path):
     """Validate the committed maintenance job specification without opening runtime or storage."""
     from congress_api.lake.daily import ALL_TABLE_NAMES
@@ -396,7 +412,7 @@ def load_spec(path):
     if not isinstance(external_pins,list):
         raise ValueError('Maintenance external_pins must be a list of release IDs')
     pins=[_release(pin) for pin in external_pins]
-    validated_tables=_tables(value['tables'])
+    validated_tables=_tables(_daily_tables(value['tables'],base))
     thresholds=value['thresholds']
     maintenance_decision({metric:0 for metric in METRICS},thresholds)
     result=dict(
@@ -458,6 +474,10 @@ def load_spec(path):
         lake_cfg=value['lake_maintenance']
         if not isinstance(lake_cfg,dict):
             raise ValueError('Maintenance lake_maintenance must be an object')
+        # tables are also the rebuild and purge targets: through the daily reference a rebuild
+        # would aim at a live table and a purge target would move whenever the daily moves.
+        if isinstance(value['tables'],str) and (lake_cfg.get('rebuild') or lake_cfg.get('purge')):
+            raise ValueError('Lake rebuild and purge name their targets: give an explicit tables map')
         result['lake_maintenance']=dict(lake_cfg)
     return result
 
@@ -470,11 +490,11 @@ def _connect(spec,storage_factory,**options):
 
 def _engine_config(spec,*,need_engine):
     """The runtime config a maintenance step uses: the spec's, the remote runtime's, else the local job runtime's."""
-    config=(spec.get('engine_config') or os.environ.get('DOCSPEC_RUNTIME_CONFIG')
-        or (os.environ.get('DOCSPEC_JOB_CONFIG') if need_engine else None))
+    from docspec_client.client import choose_runtime
+    config,choice=choose_runtime(spec.get('engine_config'),job_fallback=need_engine)
     if need_engine and (not isinstance(config,str) or not config.strip()):
         raise ValueError('Maintenance raw or lake operations require engine_config or DOCSPEC_RUNTIME_CONFIG')
-    return config
+    return config,choice
 
 
 def _retain_releases(spec,client,*,now,execute=False):
@@ -595,15 +615,18 @@ def execute(spec,*,runtime_factory=None,storage_factory=None,now=None,execute=Tr
     from congress_api.retention.body_store import BodyStore,R2Adapter,R2Source
     from congress_api.retention.r2 import configure_read_retries
     import congress_api.retention.raw_verifier as raw_verifier
-    from docspec_client.client import NativeDatasets
+    import sys
+    from docspec_client.client import NativeDatasets,runtime_record
     runtime_factory=runtime_factory or NativeDatasets.from_config
     current_time=_time(now or datetime.now(timezone.utc))
     need_engine=bool(spec.get('raw_verification') or spec.get('lake_maintenance'))
-    engine_config=_engine_config(spec,need_engine=need_engine)
+    engine_config,choice=_engine_config(spec,need_engine=need_engine)
+    ran=None
     raw_report=None
     lake_report=dict(decisions={},rebuilt={},purged=[])
     with (runtime_factory(engine_config) if engine_config else nullcontext(None)) as engine:
         if engine is not None:
+            ran=runtime_record(engine_config,choice,log=sys.stderr)
             engine.verify_runtime()
         client=_connect(spec,storage_factory,retries={'total_max_attempts':1})
         reader=ReadOnlyClient(client)
@@ -669,6 +692,8 @@ def execute(spec,*,runtime_factory=None,storage_factory=None,now=None,execute=Tr
         bucket=spec['bucket'],
         catalog_root=spec['catalog_root'],
         work=spec['work'],
+        engine_config=engine_config,
+        engine_runtime=ran,
         releases=releases,
         raw_verification=raw_report,
         lake_maintenance=lake_report,

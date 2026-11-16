@@ -13,7 +13,7 @@ def test_reference_matches_registry_and_nested_paths_are_explicit():
     schema = build_schema()
     assert REFERENCE.read_text() == render_reference(schema)
     tables = {f['name'].removesuffix('.parquet'): f for f in schema['files']}
-    assert len(tables) == 28
+    assert len(tables) == 31
     assert tables['caption_resources']['identity']['fields'] == ['video_key','track_body','ordinal']
     assert tables['rosters']['identity']['fields'] == ['congress', 'system_code', 'bioguide_id']
     assert tables['urls']['identity']['scope'] == 'release'
@@ -75,7 +75,32 @@ def test_release_availability_keeps_unavailable_definitions_and_identity():
     assert published['schema_version'] == 1 and published['relationships_version'] == 1
 
 
+def test_release_publishes_kind_synonyms_for_readers_to_filter_as_one():
+    """ct-isnv: the House guide titles one type 'Written Witness Testimony or Witness Statement'.
+    The site and the MCP read this from each release's schema.json and filter the words as one kind.
+    Owner, 2026-11-11: add the pairs that mean the same thing on real documents, the House guide's word
+    first (investigation govinfo-synonyms-20261111): a committee's markup amendment, and a biography of
+    someone appearing before the committee; and, by the owner's choice, a Member's opening statement and
+    a committee's transcript (a printed hearing labelled transcript is tagged published-hearing instead).
+    Words that are broader or name another publication stay apart."""
+    listed = next(t for t in build_schema(['list.parquet']) ['files'] if t['name'] == 'list.parquet')
+    assert listed['synonyms'] == {'document_kind[]': [['witness-statement', 'testimony'], ['committee-amendment', 'amendment'],
+                                                      ['witness-biography', 'biography'], ['member-statement', 'opening-statement'],
+                                                      ['committee-transcript', 'transcript']]}
+    assert 'synonyms' not in next(t for t in build_schema()['files'] if t['name'] == 'detail.parquet')
+
+
+def _synonyms(schema, value):
+    next(t for t in schema['files'] if t['name'] == 'list.parquet')['synonyms'] = value
+
+
 @pytest.mark.parametrize('mutation,expected', [
+    (lambda s: _synonyms(s, {'not_a_field[]': [['a', 'b']]}), 'Unknown synonym field'),
+    (lambda s: _synonyms(s, {'document_kind[]': [['testimony']]}), 'Invalid synonyms'),
+    (lambda s: _synonyms(s, {'document_kind[]': [['testimony', '']]}), 'Invalid synonyms'),
+    (lambda s: _synonyms(s, {'document_kind[]': [['testimony', 'testimony']]}), 'Invalid synonyms'),
+    (lambda s: _synonyms(s, {'document_kind[]': [['witness-statement', 'testimony'], ['testimony', 'statement']]}), 'Invalid synonyms'),
+    (lambda s: _synonyms(s, {'document_kind[]': 'testimony'}), 'Invalid synonyms'),
     (lambda s: s['relationships'][0]['source'].update(fields=['not_a_field']), 'Unknown field path'),
     (lambda s: s['relationships'][0]['target'].update(table='absent'), 'Unknown relationship table'),
     (lambda s: s['relationships'].append(deepcopy(s['relationships'][0])), 'Duplicate relationship'),
@@ -149,6 +174,55 @@ def test_native_checks_refuse_a_witness_key_map_that_breaks_its_own_rules(tmp_pa
     assert {k: found[k] for k in ('misplaced_witness_key_map_key', 'inconsistent_witness_key_map',
                                   'invalid_witness_key_map_key')} == dict(
         misplaced_witness_key_map_key=4, inconsistent_witness_key_map=2, invalid_witness_key_map_key=0)
+
+
+def test_native_checks_refuse_people_or_person_aliases_that_break_invariants(tmp_path):
+    from congress_api.retention.provenance import run_job
+    from docspec_client.client import NativeDatasets
+    engine = NativeDatasets.from_config(os.environ['DOCSPEC_JOB_CONFIG'])
+    row = "SELECT '{}' AS old_person_key,{} AS person_key,'{}' AS status,{} AS kind,{} AS decision_id,'{}' AS last_release_id,{} AS candidate_keys"
+    none, empty = "arrow_cast(NULL,'Utf8')", "arrow_cast(array_slice(make_array(cast(NULL AS VARCHAR)),1,0),'List(Utf8)')"
+    rel_id = 'a' * 64
+    rows = [
+        row.format('0011223344556677', "'1111222233334444'", 'unambiguous', "'regrouped'", none, rel_id, empty),  # sound
+        row.format('2233445566778899', none, 'ambiguous', "'split'", none, rel_id, "make_array('1111222233334444','5555666677778888')"),  # sound
+        row.format('aabbccddeeff0011', none, 'unresolved', none, none, rel_id, empty),  # sound
+        row.format('1111222233334444', "'1111222233334444'", 'unambiguous', "'regrouped'", none, rel_id, empty),  # old_person_key still published
+        row.format('33445566778899aa', "'deadbeef00001111'", 'unambiguous', "'regrouped'", none, rel_id, empty),  # successor not published
+        row.format('445566778899aabb', none, 'ambiguous', "'split'", none, rel_id, "make_array('1111222233334444','deadbeef00002222')"),  # candidate not published
+        row.format('5566778899aabbcc', "'1111222233334444'", 'ambiguous', "'split'", none, rel_id, "make_array('1111222233334444','5555666677778888')"),  # ambiguous with person_key
+        row.format('66778899aabbccdd', none, 'unresolved', "'split'", none, rel_id, empty),  # unresolved with kind
+    ]
+    steps = [
+        dict(name='ordered', sql="SELECT 0 AS list_row,arrow_cast(make_array(),'List(Utf8)') AS witness_keys"),
+        dict(name='details', sql="SELECT 0 AS list_row,cast(NULL AS VARCHAR) AS link_key"),
+        dict(name='links', sql="SELECT 0 AS list_row,'present-link' AS link_key"),
+        dict(name='witnesses_export', sql="SELECT 'w1' AS witness_key,'1111222233334444' AS person_key UNION ALL SELECT 'w2','missing-person'"),
+        dict(name='members_export', sql="SELECT 'A000001' AS bioguide_id"),
+        dict(name='people_export', sql=(
+            "SELECT '1111222233334444' AS person_key,cast(NULL AS VARCHAR) AS bioguide_id,make_array('w1') AS witness_keys "
+            "UNION ALL SELECT '5555666677778888','B999999',make_array('missing-w')")),
+        dict(name='person_aliases_export', sql=' UNION ALL '.join(rows)),
+        dict(name='prior_people', sql="SELECT '1111222233334444' AS person_key UNION ALL SELECT '0011223344556677' UNION ALL SELECT 'lost000011112222'"),
+        dict(name='base_person_aliases', sql="SELECT 'aabbccddeeff0011' AS old_person_key UNION ALL SELECT 'lost333344445555'"),
+    ]
+    schema = build_schema()
+    keep = {'witnesses.parquet', 'members.parquet', 'people.parquet', 'person_aliases.parquet'}
+    schema['files'] = [t for t in schema['files'] if t['name'] in keep]
+    for t in schema['files']:
+        pk = set(t['identity']['fields'])
+        for column in t['columns']:
+            column['nullable'] = column['name'] not in pk
+    result = run_job(tmp_path, engine, inputs=[], steps=steps, outputs=[],
+                     queries=publication_checks(schema, {'witnesses', 'members', 'people', 'person_aliases'},
+                                                keyed_documents=False, input_names={'prior_people', 'base_person_aliases'}))
+    found = result['relationship_invariants'][0]
+    assert {k: found[k] for k in (
+        'misplaced_person_alias_key', 'inconsistent_person_aliases', 'missing_witness_person',
+        'missing_person_witness', 'missing_person_member', 'lost_person_keys',
+    )} == dict(
+        misplaced_person_alias_key=4, inconsistent_person_aliases=2, missing_witness_person=1,
+        missing_person_witness=1, missing_person_member=1, lost_person_keys=2)
 
 
 def test_every_registry_column_declares_nullability():

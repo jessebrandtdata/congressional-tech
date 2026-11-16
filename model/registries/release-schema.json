@@ -55,7 +55,13 @@
         {
           "name": "document_date",
           "type": "date32",
-          "meaning": "Date of the document as read; detail.document_date_status says whether it is accepted or suspect",
+          "meaning": "Date of the document as read; document_date_status says whether it is accepted or suspect",
+          "nullable": true
+        },
+        {
+          "name": "document_date_status",
+          "type": "dict",
+          "meaning": "accepted, or suspect for a filename date more than 30 days after first_captured or outside the tagged Congress's years (one year of margin); document_date keeps the literal reading either way; null when undated",
           "nullable": true
         },
         {
@@ -136,9 +142,33 @@
       ],
       "notes": {
         "version_keys[]": "Shared lowercase hexadecimal endpoint keys identify different editions, not alternate formats of one document. A document can have several keys.",
-        "document_kind[]": "Embedded classification values, not foreign keys.",
+        "document_kind[]": "Embedded classification values, not foreign keys. Words listed together under synonyms name one kind (the first is the House naming guide's word); filter them as one.",
         "document_family[]": "Embedded filename classification values.",
         "chambers[]": "Embedded chamber labels."
+      },
+      "synonyms": {
+        "document_kind[]": [
+          [
+            "witness-statement",
+            "testimony"
+          ],
+          [
+            "committee-amendment",
+            "amendment"
+          ],
+          [
+            "witness-biography",
+            "biography"
+          ],
+          [
+            "member-statement",
+            "opening-statement"
+          ],
+          [
+            "committee-transcript",
+            "transcript"
+          ]
+        ]
       },
       "nullability": "Nullability transcribes data model \u00a78.1 (list.parquet bullet): a type without \"nullable\" there is required."
     },
@@ -182,9 +212,9 @@
           "nullable": true
         },
         {
-          "name": "document_date_status",
+          "name": "title_source",
           "type": "dict",
-          "meaning": "accepted, or suspect for a filename date more than 30 days after first_captured or outside the tagged Congress's years (one year of margin); document_date keeps the literal reading either way; null when undated",
+          "meaning": "Which candidate gave the title: correction, page_title, page_heading (including a dead source page the document showed), link_text, other_format_page_title, other_format_page_heading, copy_link_text, recovered_copy, mods_title, or label_witness (a label with the witness name); null when untitled",
           "nullable": true
         },
         {
@@ -346,7 +376,13 @@
         {
           "name": "document_date",
           "type": "date32",
-          "meaning": "Date of the document as read; detail.document_date_status says whether it is accepted or suspect",
+          "meaning": "Date of the document as read; document_date_status says whether it is accepted or suspect",
+          "nullable": true
+        },
+        {
+          "name": "document_date_status",
+          "type": "dict",
+          "meaning": "accepted, or suspect for a filename date more than 30 days after first_captured or outside the tagged Congress's years (one year of margin); document_date keeps the literal reading either way; null when undated",
           "nullable": true
         },
         {
@@ -528,6 +564,60 @@
         "address_versions": "Set only when successor_key is null; an address can hold several editions (data model \u00a77.5), so the notice lists them instead of choosing one."
       },
       "nullability": "Nullability transcribes data model \u00a78.1 (retired_links.parquet row)."
+    },
+    {
+      "name": "corrections.parquet",
+      "columns": [
+        {
+          "name": "original_url",
+          "type": "string",
+          "meaning": "Original dead address whose wrong recovered copy was rejected",
+          "nullable": false
+        },
+        {
+          "name": "rejected_body",
+          "type": "fixed[32]",
+          "meaning": "SHA-256 of the rejected recovery copy for original_url",
+          "nullable": false
+        },
+        {
+          "name": "decision_id",
+          "type": "string",
+          "meaning": "Permanent provenance recovery rejection record identifier",
+          "nullable": false
+        },
+        {
+          "name": "decided_at",
+          "type": "timestamp",
+          "meaning": "UTC timestamp when the rejection was recorded",
+          "nullable": false
+        },
+        {
+          "name": "recovered_url",
+          "type": "string",
+          "meaning": "Address where the rejected copy was found, when recorded",
+          "nullable": true
+        },
+        {
+          "name": "identity_note",
+          "type": "string",
+          "meaning": "Authored explanation of why the copy was rejected, when recorded",
+          "nullable": true
+        }
+      ],
+      "gaps": [],
+      "purpose": "Permanent recovery rejections that corrected dead-link answers",
+      "row_meaning": "One rejected recovery copy for an original dead address",
+      "identity": {
+        "fields": [
+          "original_url",
+          "rejected_body"
+        ],
+        "scope": "published identifier",
+        "validation": "native publication key checks",
+        "kind": "primary_key"
+      },
+      "nullability": "original_url, rejected_body, decision_id and decided_at are required on every active rejection decision; recovered_url and identity_note are optional provenance fields."
     },
     {
       "name": "urls.parquet",
@@ -853,9 +943,15 @@
         },
         {
           "name": "document_references",
-          "type": "list<struct<collection string, ordinal int32, url string, role string, format string, description string, name string>>",
+          "type": "list<struct<collection string, ordinal int32, url string, role string, format string, description string, name string, listing_status string, last_listed_on date32, unlisted_since date32, unlisted_by_record_sha string>>",
           "nullable": true,
-          "meaning": "Congress.gov document links in source collection order. Null means the metadata is unavailable or unstated. An empty list means a supplied collection contained no links."
+          "meaning": "Congress.gov document links in source collection order, plus earlier Congress.gov document links no longer listed on the current read (listing_status no_longer_listed). Null means the metadata is unavailable or unstated. An empty list means a supplied collection contained no links."
+        },
+        {
+          "name": "unlisted_subjects",
+          "type": "list<struct<subject_key string, last_listed_on date32, unlisted_since date32, unlisted_by_record_sha string>>",
+          "nullable": false,
+          "meaning": "Bills and nominations that an earlier Congress.gov read of this meeting listed and the current read omits, with the date last seen listed and the date and SHA-256 of the read that stopped listing each"
         },
         {
           "name": "publisher_status",
@@ -885,7 +981,7 @@
           "name": "outcome_source_reference",
           "type": "string",
           "nullable": true,
-          "meaning": "Print package ID, transcript list_row, or event ID with source observations/review"
+          "meaning": "Print package ID, transcript document link_key, event ID with curated review, or cancellation record_sha"
         },
         {
           "name": "outcome_reason",
@@ -923,6 +1019,8 @@
         "document_references[].url": "Publisher link. Use the existing document address lookup to find saved copies.",
         "document_references[].role": "Publisher documentType. Null when omitted.",
         "document_references[].format": "Publisher format, independent of the format of the saved body. Null when omitted.",
+        "document_references[].listing_status": "listed when present on the current Congress.gov read; no_longer_listed when an earlier Congress.gov read of this meeting listed the URL and a later read omitted it (ct-960v).",
+        "unlisted_subjects[]": "Measures and nominations an earlier Congress.gov read of this meeting listed that are absent from the current subject_keys list (ct-960v).",
         "publisher_status_observations[]": "Retained source statuses include their own meeting date and raw record identity; a changed date must not transfer a cancellation to another sitting.",
         "congress_gov_detail_observation": "Evidence for the full Congress/chamber/event identity in selected release inputs only. Missing evidence stays unknown; this object does not certify complete acquisition history.",
         "congress_gov_detail_observation.successful_read": "One qualified successful receipt and its response digest, retrieval time and selected reader versions. Nullable; retained independently of later failures.",
@@ -938,7 +1036,7 @@
         {
           "name": "witness_key",
           "type": "string",
-          "meaning": "Lowercase hex of first 8 bytes of SHA-256 of [\"witness-occurrence-v2\", occasion, source, record_sha_hex, source_locator, context_key]",
+          "meaning": "Published witness appearance key: carried forward from the live release when matched by (source, record_sha, source_locator) or unique (source, occasion, package_id, normalized name, organization, position, occurrence_ordinal); otherwise lowercase hex of first 8 bytes of SHA-256 of [\"witness-appearance-v3\", occasion, source, coalesce(package_id, \"\"), name_t, organization_t, position_t, occurrence_ordinal]",
           "nullable": false
         },
         {
@@ -996,6 +1094,18 @@
           "meaning": "Display name of the witness"
         },
         {
+          "name": "rank",
+          "type": "string",
+          "nullable": true,
+          "meaning": "Military rank of the witness when stated (e.g. Lt. Gen., Rear Adm.); extracted from the witness heading rather than left in name (owner decision 2026-11-10, ct-17op)"
+        },
+        {
+          "name": "credentials",
+          "type": "string",
+          "nullable": true,
+          "meaning": "Academic, professional, or service credentials of the witness when stated (e.g. M.D., M.P.H., Ph.D., USAF (Ret.)); extracted rather than dropped or left in name (owner decision 2026-11-10, ct-17op)"
+        },
+        {
           "name": "position",
           "type": "string",
           "nullable": true,
@@ -1041,7 +1151,7 @@
           "name": "witness_type",
           "type": "dict",
           "nullable": true,
-          "meaning": "Source witness classification; for GovInfo prints, statement_for_record or member_statement marks an entry that is a statement, not a witness"
+          "meaning": "Witness classification: the source's (house_xml's own witness type), for GovInfo prints statement_for_record, member_statement or record_material when the entry is a statement, not a witness, and member_appearance when the archive matched a sitting Member of Congress acting officially (matched_bioguide_id, match_basis), or member_statement when that Member sits, by the pinned rosters, on the hearing's committee or its parent committee in the Congress of the hearing and the row says opening statement (a committee member's own opening statement). For member_appearance rows, and member_statement rows with a matched_bioguide_id, this is the archive's classification and replaces the source's value, which stays in the appearance record (appearance_records lake, witness_type) and the raw source body (record_sha)"
         },
         {
           "name": "testified",
@@ -1053,16 +1163,63 @@
           "name": "bioguide_id",
           "type": "dict",
           "nullable": true,
-          "meaning": "Bioguide identifier when the witness is a Member of Congress"
+          "meaning": "Bioguide identifier the publisher states for the witness (house_xml); never inferred"
         },
         {
           "name": "superseded_by",
           "type": "string",
           "nullable": true,
           "meaning": "witness_key of the same person stated on the same meeting by a higher-ranked source (source priority, then record); null for the row to show"
+        },
+        {
+          "name": "matched_bioguide_id",
+          "type": "dict",
+          "nullable": true,
+          "meaning": "Member of Congress the archive matched to a member_appearance row, or to a member_statement row that is a committee member's own opening statement, holding office on the hearing date: the publisher's Bioguide ID, or the stated name and term dates (see match_basis); null on every other row"
+        },
+        {
+          "name": "match_basis",
+          "type": "dict",
+          "nullable": true,
+          "meaning": "How matched_bioguide_id was found. publisher_id: the source's own Bioguide ID, of a Member with a term covering the hearing date. Every other basis is archive-matched and needs a term covering the hearing date and no word of the row saying former, a closed span of years, a state legislature, a House or Senate officer or staffer, or the person's own nomination; the bases are tried in this order. The name bases need the row's last name to be a word of the Member's name_last and a first name of the row that equals the Member's first name or the nickname the members data holds (an equal first name is required when several Members fit), shares its first three letters, or spells out an abbreviated one ('Wm.'), a lone initial never counting for a full name. name_state: the row names that term's state, plus a chamber, a congressional role, or nothing but Congress and places; name_chamber: it names that term's chamber ('U.S. Senator', 'Representative in Congress', a district code like '(NM-01)', 'Rep.' alone) or 'Member of Congress', and no state; name_role: it opens a field with a chair, ranking member or leadership role of a committee, subcommittee, caucus or conference, or names a commission on which Members serve as Members (model/registries/congressional-commissions.json), names no state, and its first name agrees in full. seat: no name basis gives one Member, the row states a House seat (a state and district: '46th District; California', '(AR-2)'; a state at large: '(ND-At Large)'; or a territory's Delegate or Resident Commissioner: 'a Delegate from Guam'), names no state legislature, and a word of its name or first field is the family name of the Member holding that seat on the hearing date; no first name is needed. initial: no name basis has a candidate and no seat decides, the row names a chamber (or 'Member of Congress') and a state, one side of the first name is a bare initial ('C.' Cox in the members data, 'JD' Vance in the row) that the other starts with, and that Member is the only one sitting in the named chamber and state on the hearing date whose family name and a first-name initial the row shares. member_day: the row is a name with no other field at a hearing whose title says Member Day or Members' Day (not Former Members Day), and its family and first name agree with exactly one Member sitting on the hearing date (an equal first name decides between several). group: another source's row of the same appearance (superseded_by) matched"
+        },
+        {
+          "name": "person_key",
+          "type": "string",
+          "nullable": true,
+          "meaning": "Published person identifier in people.parquet (Bioguide ID for matched/publisher Members; 16-hex person-v1 or person-singleton-v1 key for non-Members; inherited across superseded_by); null on record entries, unnamed rows, and unmatched member_appearance rows (ct-ha10)"
+        },
+        {
+          "name": "listing_status",
+          "type": "dict",
+          "nullable": false,
+          "meaning": "listed when present on the source's current record; no_longer_listed when an earlier Congress.gov read of this meeting listed the witness and a later Congress.gov read omitted them (ct-960v)"
+        },
+        {
+          "name": "last_listed_on",
+          "type": "date32",
+          "nullable": true,
+          "meaning": "Date of the latest Congress.gov read that still listed a no_longer_listed witness; null when listing_status is listed"
+        },
+        {
+          "name": "unlisted_since",
+          "type": "date32",
+          "nullable": true,
+          "meaning": "Date of the earliest subsequent Congress.gov read that stopped listing a no_longer_listed witness; null when listing_status is listed"
+        },
+        {
+          "name": "unlisted_by_record_sha",
+          "type": "string",
+          "nullable": true,
+          "meaning": "Lowercase SHA-256 of the earliest subsequent Congress.gov read that stopped listing a no_longer_listed witness; null when listing_status is listed"
         }
       ],
-      "gaps": [],
+      "gaps": [
+        "Sitting Members the rules cannot read stay witnesses: on the 2026-11-10 release, at least 99 shown rows, of which about 31 state an office but give a first name the members data does not hold (initial-only or middle-name Members such as T. Slade Gorton or J. French Hill, typos such as 'Partick' Leahy), 13 are print headings garbled into names, 5 state a role the rules do not read, 49 give a name alone at an ordinary hearing, and 1 a name with another Member's state at a Member Day hearing; about 20 more are question-and-answer lines of committee Members.",
+        "member_day cannot tell a sitting Member from an outside witness of the same name listed by name alone at a Member Day hearing: nothing in the row says which, and Member Day hearings sometimes also hear outside witnesses ('Member Day and Outside Witnesses', 'Public Witness Testimony'). Such a namesake would be published as that Member; none was found in this release.",
+        "The congressional commissions in model/registries/congressional-commissions.json carry statute citations marked unverified until checked against the law's text.",
+        "A committee member's opening statement stays a member_appearance when the rule cannot see it: before the 113th Congress when the print's own MODS member list omits the Member (it lists only some members); when neither the meeting nor the print names the hearing's committee; and when the print's line labels the statement only by a heading the parser does not keep in the row's fields ('OPENING STATEMENTS Crapo, Hon. Michael D.'). The print's own committee code and member list come from its MODS through the appearance records, which the lake's MODS producer does not yet fill."
+      ],
       "purpose": "Witness appearances",
       "row_meaning": "One source-occurrence witness observation at a meeting, package, or page; not a deduplicated person",
       "identity": {
@@ -1074,7 +1231,8 @@
         "kind": "primary_key"
       },
       "notes": {
-        "occasion": "meeting:{event_id}, package:{package_id}, or page:{sha256_prefix}. Witness keys hash the occasion, source, record_sha, source_locator, and context_key; names alone never join or deduplicate appearances."
+        "occasion": "meeting:{event_id}, package:{package_id}, or page:{sha256_prefix}. Live witness keys carry forward across re-fetches and parser updates; genuinely new entries mint witness-appearance-v3 keys. Names alone never join or deduplicate appearances.",
+        "witness_type": "A sitting Member of Congress acting officially is a Member appearance, not a witness (ct-kw85): witness_type member_appearance, kept in the hearing's list with that label and left out of witness counts. An archive match needs the row's own state, chamber or committee role and an agreeing first name, a stated House seat whose holder's family name the row gives, a bare initial only one sitting Member in the stated chamber and state shares, or a name alone at a Member Day hearing that only one sitting Member's name fits (match_basis); several fitting Members, a former Member, a state legislator, a congressional employee and the hearing's own nominee stay witnesses, and a row that names a Member with nothing else stays a witness. A committee member's own opening statement at the hearing is a member_statement with its matched Member, not a Member appearance (owner decision 2026-11-10): the row says opening statement and the Member is seated, in the Congress of the hearing date, on the hearing's committee (the meeting's, else the print's: its own documents' committees and its own MODS committee code) or on its parent committee (a subcommittee code's first four letters and '00', since a full committee's chair and ranking member open its subcommittees' hearings but rosters seat them on the full committee only). Seated means the pinned rosters, or, for a Congress they do not hold (before the 113th), the print's own MODS committee member list."
       },
       "nullability": "Nullability transcribes the phase-2 annex \u00a73 file table (docs/plans/phase-2-annex-20261028.md): a type without \"nullable\" there is required."
     },
@@ -1125,7 +1283,7 @@
         }
       ],
       "gaps": [
-        "Derived from earlier bodies the lake still holds, not from earlier releases: a key published only from a body no longer held has no row"
+        "Five historical Senate page keys from pre-ledger releases whose pages no longer belong to any meeting carry reviewed status unresolved in model/registries/historical-witness-keys.json"
       ],
       "purpose": "Earlier witness keys and the current witness each resolves to",
       "row_meaning": "One witness key this release no longer publishes, with its successor, its candidates, or neither",
@@ -1138,10 +1296,195 @@
         "kind": "primary_key"
       },
       "notes": {
-        "old_key": "Disjoint from witnesses.witness_key. A re-fetched body, a newly bound capture context, or a meeting link that moves a print or Senate page off its package or page occasion gives each witness a new key (witness-occurrence-v2 is unchanged); the earlier keys are listed here. A name alone never maps (ct-30fp).",
+        "old_key": "Disjoint from witnesses.witness_key. Carried witness keys stay in witnesses.parquet across re-fetches and parser splits; only edited names (locator), ambiguous multiplicity changes, carried 1-hop ledger entries, and reviewed historical Senate keys enter witness_key_map (ct-46f3). Any unmapped live key refuses export (lost_witness_keys). A name alone never maps (ct-30fp).",
         "witness_key": "The successor can itself be superseded_by a higher-ranked row of the same person; follow witnesses.superseded_by to the row to show."
       },
       "nullability": "witness_key is set exactly when status is unambiguous; basis is null exactly when status is unresolved (ct-kb4w)."
+    },
+    {
+      "name": "people.parquet",
+      "columns": [
+        {
+          "name": "person_key",
+          "type": "string",
+          "nullable": false,
+          "meaning": "Published person identifier: Bioguide ID for Members; lowercase 16-hex SHA-256 prefix over [\"person-v1\", name_key, org_key, middle, suffix] for grouped non-Members or [\"person-singleton-v1\", witness_key] when organization is empty or name is unusable"
+        },
+        {
+          "name": "bioguide_id",
+          "type": "string",
+          "nullable": true,
+          "meaning": "Bioguide identifier in members.parquet when grouping_basis is bioguide; null otherwise"
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "nullable": false,
+          "meaning": "Primary display name from the person's most recent canonical appearance"
+        },
+        {
+          "name": "rank",
+          "type": "string",
+          "nullable": true,
+          "meaning": "Primary military or uniformed-service rank from the person's most recent canonical appearance stating one; null when none is stated"
+        },
+        {
+          "name": "ranks",
+          "type": "list<string>",
+          "nullable": false,
+          "meaning": "Distinct non-empty stated military or uniformed-service ranks across the person's canonical appearances, sorted"
+        },
+        {
+          "name": "credentials",
+          "type": "string",
+          "nullable": true,
+          "meaning": "Primary post-nominal credentials from the person's most recent canonical appearance stating any; null when none are stated"
+        },
+        {
+          "name": "name_variants",
+          "type": "list<string>",
+          "nullable": false,
+          "meaning": "Distinct stated names across the person's canonical appearances, sorted"
+        },
+        {
+          "name": "organization",
+          "type": "string",
+          "nullable": true,
+          "meaning": "Primary stated organization from the person's most recent canonical appearance naming one; null when none is stated"
+        },
+        {
+          "name": "organizations",
+          "type": "list<string>",
+          "nullable": false,
+          "meaning": "Distinct non-empty stated organizations across the person's canonical appearances, sorted"
+        },
+        {
+          "name": "positions",
+          "type": "list<string>",
+          "nullable": false,
+          "meaning": "Distinct non-empty stated titles/positions across the person's canonical appearances, sorted"
+        },
+        {
+          "name": "grouping_basis",
+          "type": "dict",
+          "nullable": false,
+          "meaning": "How the person's appearances were grouped: bioguide, name_organization, singleton, or reviewed"
+        },
+        {
+          "name": "appearance_count",
+          "type": "int32",
+          "nullable": false,
+          "meaning": "Count of canonical (superseded_by IS NULL) appearances belonging to this person"
+        },
+        {
+          "name": "hearing_count",
+          "type": "int32",
+          "nullable": false,
+          "meaning": "Count of distinct hearing occasions across canonical appearances belonging to this person"
+        },
+        {
+          "name": "first_seen_date",
+          "type": "date32",
+          "nullable": true,
+          "meaning": "Earliest hearing date across canonical appearances; null when every appearance is undated"
+        },
+        {
+          "name": "last_seen_date",
+          "type": "date32",
+          "nullable": true,
+          "meaning": "Latest hearing date across canonical appearances; null when every appearance is undated"
+        },
+        {
+          "name": "witness_keys",
+          "type": "list<string>",
+          "nullable": false,
+          "meaning": "Sorted canonical witness_key values belonging to this person"
+        }
+      ],
+      "gaps": [
+        "Non-Members merge only on exact normalized name plus full normalized organization with middle-initial and suffix guards; career moves across employers, sub-unit vs parent agency variants, and appearances with empty organizations remain separate person rows until reviewed cross-employer evidence ships"
+      ],
+      "purpose": "Hearing people grouped across appearances",
+      "row_meaning": "One Member of Congress (by Bioguide) or one non-Member witness group sharing normalized name and full normalized organization under middle-initial and suffix guards (or one singleton appearance)",
+      "identity": {
+        "fields": [
+          "person_key"
+        ],
+        "scope": "published identifier",
+        "validation": "native publication key checks",
+        "kind": "primary_key"
+      },
+      "notes": {
+        "ranks[]": "Stated military or uniformed-service rank strings from hearing records; values, not keys.",
+        "name_variants[]": "Stated display strings from hearing records; values, not keys.",
+        "organizations[]": "Stated organization strings from hearing records; values, not keys.",
+        "positions[]": "Stated position/title strings from hearing records; values, not keys.",
+        "witness_keys[]": "Canonical witness_key references into witnesses.parquet; superseded witness rows also carry person_key on witnesses.parquet."
+      },
+      "nullability": "person_key, name, grouping_basis, counts, and list columns are required; bioguide_id, rank, credentials, organization, and date bounds are nullable."
+    },
+    {
+      "name": "person_aliases.parquet",
+      "columns": [
+        {
+          "name": "old_person_key",
+          "type": "string",
+          "nullable": false,
+          "meaning": "A previously published person_key no longer present in people.parquet"
+        },
+        {
+          "name": "person_key",
+          "type": "string",
+          "nullable": true,
+          "meaning": "Current people.person_key when status is unambiguous; null when status is ambiguous or unresolved"
+        },
+        {
+          "name": "status",
+          "type": "dict",
+          "nullable": false,
+          "meaning": "unambiguous (one successor), ambiguous (split across candidate_keys, none chosen), or unresolved (no current person row)"
+        },
+        {
+          "name": "kind",
+          "type": "dict",
+          "nullable": true,
+          "meaning": "Transition kind: regrouped, merged, split, or hidden; null when status is unresolved"
+        },
+        {
+          "name": "decision_id",
+          "type": "string",
+          "nullable": true,
+          "meaning": "Identifier of the reviewed decision in model/registries/person-decisions.json when applicable; null for rule-driven transitions"
+        },
+        {
+          "name": "last_release_id",
+          "type": "string",
+          "nullable": true,
+          "meaning": "Release SHA-256 of the last published release in which old_person_key appeared in people.parquet"
+        },
+        {
+          "name": "candidate_keys",
+          "type": "list<string>",
+          "nullable": false,
+          "meaning": "Sorted current people.person_key values when status is ambiguous; empty otherwise"
+        }
+      ],
+      "gaps": [],
+      "purpose": "Retired person_key redirects and split notices",
+      "row_meaning": "One previously published person_key not in people.parquet, carried one hop per release",
+      "identity": {
+        "fields": [
+          "old_person_key"
+        ],
+        "scope": "published identifier",
+        "validation": "native publication key checks",
+        "kind": "primary_key"
+      },
+      "notes": {
+        "old_person_key": "Disjoint from people.person_key; a key published again leaves person_aliases. Any vanished prior person_key absent from both people and person_aliases refuses export (lost_person_keys).",
+        "candidate_keys[]": "Current people.person_key values when status is ambiguous; empty otherwise."
+      },
+      "nullability": "person_key is set exactly when status is unambiguous; kind is null exactly when status is unresolved; candidate_keys has two or more entries exactly when status is ambiguous."
     },
     {
       "name": "recordings.parquet",
@@ -1162,6 +1505,12 @@
           "name": "tracks",
           "type": "list<struct<body fixed[32],suffix dict,format dict,language dict,production dict>>",
           "meaning": "Captured caption, subtitle, and playlist tracks from their latest good fetch",
+          "nullable": false
+        },
+        {
+          "name": "recording_scope",
+          "type": "dict",
+          "meaning": "full, excerpt or unknown",
           "nullable": false
         }
       ],
@@ -1406,7 +1755,7 @@
         {
           "name": "rank",
           "type": "int16",
-          "meaning": "Numeric party rank on the committee",
+          "meaning": "Numeric party rank on the committee when printed by the source",
           "nullable": true
         },
         {
@@ -1424,7 +1773,7 @@
         {
           "name": "edition_date",
           "type": "date32",
-          "meaning": "For a directory seat, the edition's dateIssued: the date the printed roster describes",
+          "meaning": "Snapshot date the roster describes: a directory edition's dateIssued, or an archived chamber file's Internet Archive capture date",
           "nullable": true
         },
         {
@@ -1479,7 +1828,7 @@
       "notes": {
         "congress": "Keyed by (congress, system_code, bioguide_id); populated from the pinned upstream committee_assignments snapshot, whose populated Congresses the coverage congress_start and congress_end bound. Earlier Congresses appear only after an upstream backfill is pinned.",
         "party": "Preserves the supplied assignment party; missing or blank values stay null. Service-term party assertions do not establish party or caucus at a roster observation, and the input does not supply qualified dated affiliation history.",
-        "congress_basis": "Earlier Congresses' seats come from one Congressional Directory edition per Congress (directory). A Congress whose edition serves no committee granules combines a reviewed reading of the edition's PDF (directory-manual) with Internet Archive captures of the House file (file) and the Senate file (caller); a seat both list is the chamber file's. The current Congress comes from the current chamber files.",
+        "congress_basis": "Earlier Congresses' seats come from one Congressional Directory edition per Congress (directory). A Congress whose edition serves no committee granules takes each committee from Internet Archive captures of the House file (file) and the Senate file (caller) when present, and falls back to a reviewed reading of the edition's PDF (directory-manual) for committees and subcommittees absent from those files. The current Congress comes from the current chamber files.",
         "title": "Chamber-file titles are verbatim (Chairman, Ranking Member); directory titles are normalized (Chair, Vice Chair, Ranking Member).",
         "system_code": "hsba00-tf-terrorism-financing is directory-defined: that House Financial Services task force has no Congress.gov code; its committees row is synthesized with parent hsba00."
       },
@@ -1769,6 +2118,18 @@
           "type": "timestamp<microsecond,UTC>",
           "meaning": "Next scheduled fetch time",
           "nullable": true
+        },
+        {
+          "name": "recheck_meeting_date",
+          "type": "date32",
+          "meaning": "Meeting date the recheck band was aged against: the address's earliest linked meeting, else the date in its docs.house.gov /meetings/ path; null when neither is known (the family's shortest band applies) and on a queued row",
+          "nullable": true
+        },
+        {
+          "name": "linked_from",
+          "type": "list<fixed[8]>",
+          "meaning": "Every read page that links a queued address, as page keys (the first 8 bytes of the page body's SHA-256, the link-key form) in key order; empty on an address with attempts",
+          "nullable": false
         }
       ],
       "gaps": [],
@@ -1783,7 +2144,8 @@
         "kind": "primary_key"
       },
       "notes": {
-        "requested_url": "Exact scheduled address. Missing success is not missing publication; this is operational capture state, not an entity or document catalogue."
+        "requested_url": "Exact scheduled address. Missing success is not missing publication; this is operational capture state, not an entity or document catalogue.",
+        "linked_from": "A page key resolves in links.parquet only when the page is itself a listed document; wrapper and listing pages are kept as evidence, not listed. Published, with recheck_meeting_date, so the release gate can trace a scheduling change to the receipts that caused it (ct-9j3z)."
       },
       "nullability": "Nullability transcribes data model \u00a77.7."
     },
@@ -2050,7 +2412,7 @@
         {
           "name": "basis",
           "type": "dict",
-          "meaning": "publisher_link, video_states_event_id or curated",
+          "meaning": "publisher_link, committee_page, video_states_event_id or curated",
           "nullable": false
         },
         {
@@ -2062,7 +2424,7 @@
         {
           "name": "score",
           "type": "int16",
-          "meaning": "100 publisher link, 95 stated event ID; null otherwise",
+          "meaning": "100 publisher or committee-page link, 95 stated event ID; null otherwise",
           "nullable": true
         },
         {
@@ -2369,7 +2731,7 @@
         {
           "name": "reason",
           "type": "dict",
-          "meaning": "Why a state holds, when known: recording_decision_unresolved_or_conflicting, package_context_only, video_text_only, excerpts_only, stated_documents_not_held, senate_page_links_pending, package_witnesses_unattached, package_names_meeting_unlinked, recording_link_pending or recording_without_video_record; for a present transcript, the sources held (printed_hearing, committee_transcript, captions)",
+          "meaning": "Why a state holds, when known: recording_decision_unresolved_or_conflicting, package_context_only, video_text_only, excerpts_only, stated_documents_not_held, senate_page_links_pending, package_witnesses_unattached, member_appearances_only (empty: the people the meeting lists, on its own list or, tied to no meeting, on a print it links, are Members of Congress, perhaps with record entries, and no outside witness), nominee_not_listed (unknown: a nomination hearing whose list names only Members, so its nominee is missing), package_names_meeting_unlinked, recording_link_pending or recording_without_video_record; for a present transcript, the sources held (printed_hearing, committee_transcript, captions)",
           "nullable": true
         }
       ],
@@ -3285,10 +3647,136 @@
           "bioguide_id"
         ]
       },
-      "meaning": "Published Bioguide identification of a witness who is a member; never infer by name.",
+      "meaning": "Bioguide identification the publisher states for a witness (house_xml); bioguide_id is never inferred. A name-matched Member is a different relationship, witness_matched_member.",
       "cardinality": "many-to-one",
       "nullable": true,
       "resolution": "unresolved_allowed",
+      "match": "equal",
+      "scope": "selected release"
+    },
+    {
+      "id": "witness_matched_member",
+      "source": {
+        "table": "witnesses",
+        "fields": [
+          "matched_bioguide_id"
+        ]
+      },
+      "target": {
+        "table": "members",
+        "fields": [
+          "bioguide_id"
+        ]
+      },
+      "meaning": "The sitting Member of Congress a member_appearance row (or a committee member's own opening statement, member_statement) is, as the archive matched it: the publisher's Bioguide ID, or inferred from a term covering the hearing date and the row's own words: its last and first name (the members data's own nickname counts) with its state, chamber or committee role, a House seat it states and the holder's family name, a bare initial only one sitting Member in the stated chamber and state shares, or a name alone at a Member Day hearing (match_basis says which). Inferred matches are labelled name-matched; a name several sitting Members fit stays unmatched.",
+      "cardinality": "many-to-one",
+      "nullable": true,
+      "resolution": "required",
+      "match": "equal",
+      "scope": "selected release"
+    },
+    {
+      "id": "witness_person",
+      "source": {
+        "table": "witnesses",
+        "fields": [
+          "person_key"
+        ]
+      },
+      "target": {
+        "table": "people",
+        "fields": [
+          "person_key"
+        ]
+      },
+      "meaning": "Person grouping for eligible witness appearances (Members by Bioguide; non-Members by normalized name and full normalized organization under middle-initial and suffix guards, or singleton fallback); inherited across superseded_by.",
+      "cardinality": "many-to-one",
+      "nullable": true,
+      "resolution": "required",
+      "match": "equal",
+      "scope": "selected release"
+    },
+    {
+      "id": "person_member",
+      "source": {
+        "table": "people",
+        "fields": [
+          "bioguide_id"
+        ]
+      },
+      "target": {
+        "table": "members",
+        "fields": [
+          "bioguide_id"
+        ]
+      },
+      "meaning": "Member of Congress record when a person row is grouped by Bioguide ID.",
+      "cardinality": "one-to-one",
+      "nullable": true,
+      "resolution": "required",
+      "match": "equal",
+      "scope": "selected release"
+    },
+    {
+      "id": "person_witnesses",
+      "source": {
+        "table": "people",
+        "fields": [
+          "witness_keys[]"
+        ]
+      },
+      "target": {
+        "table": "witnesses",
+        "fields": [
+          "witness_key"
+        ]
+      },
+      "meaning": "Canonical (superseded_by IS NULL) witness appearance rows belonging to this person.",
+      "cardinality": "many-to-many",
+      "nullable": false,
+      "resolution": "required",
+      "match": "equal",
+      "scope": "selected release"
+    },
+    {
+      "id": "person_alias_target",
+      "source": {
+        "table": "person_aliases",
+        "fields": [
+          "person_key"
+        ]
+      },
+      "target": {
+        "table": "people",
+        "fields": [
+          "person_key"
+        ]
+      },
+      "meaning": "Current person row a retired person_key resolves to when status is unambiguous.",
+      "cardinality": "many-to-one",
+      "nullable": true,
+      "resolution": "required",
+      "match": "equal",
+      "scope": "selected release"
+    },
+    {
+      "id": "person_alias_candidates",
+      "source": {
+        "table": "person_aliases",
+        "fields": [
+          "candidate_keys[]"
+        ]
+      },
+      "target": {
+        "table": "people",
+        "fields": [
+          "person_key"
+        ]
+      },
+      "meaning": "Candidate current person rows when a retired person_key split ambiguously.",
+      "cardinality": "many-to-many",
+      "nullable": false,
+      "resolution": "required",
       "match": "equal",
       "scope": "selected release"
     },
@@ -4515,6 +5003,30 @@
       ]
     },
     {
+      "id": "member_appearances",
+      "title": "Hearings where a Member of Congress appeared as a Member",
+      "dialect": "duckdb",
+      "requires": [
+        "witnesses",
+        "members"
+      ],
+      "relationships": [
+        "witness_matched_member"
+      ],
+      "parameters": [
+        {
+          "name": "bioguide_id",
+          "example": "A000001"
+        }
+      ],
+      "sql": "SELECT w.matched_bioguide_id,m.name AS member,w.witness_key,w.occasion,w.event_id,w.package_id,w.name,w.position,\n  w.match_basis,w.match_basis<>'publisher_id' AS name_matched\nFROM witnesses w LEFT JOIN members m ON m.bioguide_id=w.matched_bioguide_id\nWHERE w.matched_bioguide_id=? AND w.superseded_by IS NULL ORDER BY w.event_id NULLS LAST,w.package_id,w.witness_key LIMIT 100",
+      "result_row": "One shown Member appearance of this Member",
+      "notes": [
+        "name_matched rows were identified by name and term dates, not by the publisher; bioguide_id stays the publisher's alone.",
+        "A Member whose rows name no state, chamber or role, or share a name with another sitting Member, is not listed."
+      ]
+    },
+    {
       "id": "committee_roster",
       "title": "Committee members for a published Congress",
       "dialect": "duckdb",
@@ -4537,7 +5049,7 @@
           "example": 119
         }
       ],
-      "sql": "SELECT r.congress,r.system_code,c.name AS committee,r.bioguide_id,m.name,r.title,r.rank,r.party\nFROM rosters r LEFT JOIN committees c USING (system_code) LEFT JOIN members m USING (bioguide_id)\nWHERE r.system_code=? AND r.congress=? ORDER BY r.rank,r.bioguide_id LIMIT 100",
+      "sql": "SELECT r.congress,r.system_code,c.name AS committee,r.bioguide_id,m.name,r.title,r.rank,r.party\nFROM rosters r LEFT JOIN committees c USING (system_code) LEFT JOIN members m USING (bioguide_id)\nWHERE r.system_code=? AND r.congress=? ORDER BY r.rank,r.title IS NULL,r.bioguide_id LIMIT 100",
       "result_row": "One committee or subcommittee assignment for the selected Congress",
       "notes": [
         "An empty historical result does not establish that the committee had no members."

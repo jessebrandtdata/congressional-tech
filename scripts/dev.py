@@ -1,21 +1,27 @@
 #!/usr/bin/env python3
-"""Shared local/CI prerequisites, test selection and coverage inventory."""
+"""Shared local/CI prerequisites, test selection, coverage inventory and one read-only engine query."""
 from __future__ import annotations
 
 import argparse
 from fnmatch import fnmatch
 from hashlib import sha256
+import heapq
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tomllib
+import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
 PIN_FILE = ROOT / 'model/docspec-runtime-pin.json'
+SHARD_DURATIONS_FILE = ROOT / '.github/scripts/test-shard-durations.json'
+DEFAULT_SHARD_DURATION_MS = 5_000
+MIN_SHARD_DURATION_MS = 100
 
 
 def declaration():
@@ -205,7 +211,7 @@ def job_runtime(config, lane_name, *, pin_file=PIN_FILE):
     """
     variable = config['lanes'].get(lane_name, {}).get('required_job_config_env')
     if not variable:
-        return
+        return None
     remedy = (f'{variable} must name an explicit pinned local runtime; write one with '
               'scripts/dev.py write-local-runtime (see docs/development.md)')
     location = os.environ.get(variable)
@@ -230,6 +236,70 @@ def job_runtime(config, lane_name, *, pin_file=PIN_FILE):
             native.verify_runtime(pin_file=pin_file)
     except (OSError, ValueError, TypeError) as error:
         raise ValueError(f'{remedy}: {error}') from None
+    return location
+
+
+def table_sources(pairs):
+    """NAME=PATH pairs: a Parquet file, or a .json file holding one exact table pin on this machine.
+
+    A pin on the object store (every production lake pin) is refused here: reading it needs the
+    remote runtime and its credentials, which `query` never opens."""
+    from urllib.parse import urlsplit
+    sources = {}
+    for pair in pairs:
+        name, separator, path = pair.partition('=')
+        if not (name and separator and path) or name in sources:
+            raise ValueError(f'--table {pair}: expected NAME=PATH, each NAME once')
+        if Path(path).suffix != '.json':
+            sources[name] = path
+            continue
+        pin = json.loads(Path(path).read_text())
+        location = pin.get('metadata_location') if isinstance(pin, dict) else None
+        if not isinstance(location, str) or urlsplit(location).scheme not in ('', 'file'):
+            raise ValueError(f'{name}: {path} pins no table on this machine ({location}); a lake table on the '
+                             'object store needs the remote runtime and its credentials, which query never opens')
+        sources[name] = pin
+    return sources
+
+
+def query(config, sql, pairs, *, explain=False, analyze=False, as_json=False, memory_gib=None, work=None):
+    """Run one read-only statement on this checkout's local runtime and print its rows, or its plans.
+
+    The runtime is the one the offline lane tests with (DOCSPEC_JOB_CONFIG), verified against this
+    checkout's pin and refused if it names a remote or credentials, before anything is loaded. Rows
+    print in the statement's column order; a statement naming one column twice is refused before
+    execution by the engine (invalid_sql, provenance.query_result). TERM (how the watchdog stops a
+    job) exits through the query's cleanup, so its temporary folder goes with it."""
+    import csv
+    import signal
+    sources = table_sources(pairs)
+    location = job_runtime(config, 'production-offline')
+    from docspec_client import NativeDatasets
+    from congress_api.retention import provenance
+    options = dict(work=work) if memory_gib is None else dict(work=work, memory_bytes=int(memory_gib * 2**30))
+    stop = signal.signal(signal.SIGTERM, lambda number, frame: sys.exit(128 + number))
+    try:
+        with NativeDatasets.from_config(location) as engine:
+            if explain:
+                result = provenance.explain(engine, sql, sources, analyze=analyze, **options)
+            else:
+                columns, result = provenance.query_result(engine, sql, sources, **options)
+    finally:
+        signal.signal(signal.SIGTERM, stop)
+    if as_json:
+        print(json.dumps(result, indent=1))
+    elif explain:
+        for kind, plan in result.items():
+            print(kind, plan, sep='\n')
+    else:
+        writer = csv.writer(sys.stdout, dialect='excel-tab', lineterminator='\n')
+        writer.writerows([columns, *([cell(row[name]) for name in columns] for row in result)])
+        print(f'{len(result)} rows', file=sys.stderr)
+
+
+def cell(value):
+    """One value of the engine's JSON as tab-separated text: text as it is, NULL, anything else as JSON."""
+    return value if isinstance(value, str) else 'NULL' if value is None else json.dumps(value)
 
 
 def host_platform():
@@ -413,14 +483,72 @@ def parse_shard(value):
     return index, count
 
 
-def shard_files(files, roots, shard):
-    """Sort T enrolled files in O(T log T), retaining the lane's pytest filters."""
+def _validate_shard_durations(durations):
+    if not isinstance(durations, dict):
+        raise ValueError('shard durations must be a JSON object mapping test paths to positive integer ms')
+    for key, value in durations.items():
+        if (not isinstance(key, str) or not key.endswith('.py')
+                or isinstance(value, bool) or not isinstance(value, int) or value <= 0):
+            raise ValueError(f'invalid shard duration entry {key!r}: {value!r}')
+    return durations
+
+
+def load_shard_durations(source=SHARD_DURATIONS_FILE):
+    """Load per-file durations in integer milliseconds for deterministic LPT sharding."""
+    return _validate_shard_durations(json.loads(Path(source).read_text()))
+
+
+def junit_shard_durations(xml_paths, files):
+    """Extract per-file integer-ms timings from passing pytest JUnit XMLs, overlaying runs in order."""
+    by_dotted = {item[:-3].replace('/', '.'): item for item in files if item.endswith('.py')}
+    measured = {}
+    for xml_path in xml_paths:
+        try:
+            root = ET.parse(xml_path).getroot()
+        except ET.ParseError as error:
+            raise ValueError(f'malformed JUnit XML in {xml_path}: {error}') from None
+        if root.tag not in {'testsuite', 'testsuites'}:
+            raise ValueError(f'expected JUnit testsuite root in {xml_path}, got {root.tag!r}')
+        cases = list(root.iter('testcase'))
+        if not cases:
+            raise ValueError(f'JUnit file {xml_path} contains no testcase entries')
+        totals = {}
+        for case in cases:
+            if case.find('failure') is not None or case.find('error') is not None:
+                raise ValueError(f'refusing JUnit timings from failed or errored testcase in {xml_path}')
+            classname = case.attrib.get('classname', '')
+            if not classname and case.find('skipped') is not None:
+                classname = case.attrib.get('name', '')
+            parts = classname.split('.') if classname else []
+            matched = next((by_dotted[cand] for k in range(len(parts), 0, -1)
+                            if (cand := '.'.join(parts[:k])) in by_dotted), None)
+            if matched is None:
+                raise ValueError(f'unmapped JUnit classname {classname!r} in {xml_path}')
+            seconds = float(case.attrib.get('time', '0') or 0.0)
+            if not math.isfinite(seconds) or seconds < 0:
+                raise ValueError(f'invalid JUnit testcase time {seconds!r} for {classname!r} in {xml_path}')
+            totals[matched] = totals.get(matched, 0.0) + seconds
+        for matched, seconds in totals.items():
+            measured[matched] = max(MIN_SHARD_DURATION_MS, round(seconds * 1_000))
+    return dict(sorted(measured.items()))
+
+
+def shard_files(files, roots, shard, *, durations=None):
+    """Partition T enrolled files across K shards by greedy longest-first duration in O(T log T)."""
     index, count = shard
     if not 1 <= index <= count:
         raise ValueError('shard must satisfy 1 <= INDEX <= COUNT')
-    candidates = sorted({path for path in files if any(
-        path == root or path.startswith(root.rstrip('/') + '/') for root in roots)})
-    selected = candidates[index - 1::count]
+    table = load_shard_durations() if durations is None else _validate_shard_durations(durations)
+    candidates = {item for item in files if any(
+        item == root or item.startswith(root.rstrip('/') + '/') for root in roots)}
+    ordered = sorted(candidates, key=lambda item: (-table.get(item, DEFAULT_SHARD_DURATION_MS), item))
+    buckets = [[] for _ in range(count)]
+    heap = [(0, 0, i) for i in range(count)]
+    for item in ordered:
+        load, size, target = heapq.heappop(heap)
+        buckets[target].append(item)
+        heapq.heappush(heap, (load + table.get(item, DEFAULT_SHARD_DURATION_MS), size + 1, target))
+    selected = sorted(buckets[index - 1])
     if not selected:
         raise ValueError(f'shard {index}/{count} is empty; no tests were started')
     return selected
@@ -593,11 +721,33 @@ def main(argv=None):
                          help='Inspect only disposable attestation scratch in this compatibility proof work directory')
     clean_p.add_argument('--nightly-spill', action='store_true',
                          help='Inspect only declared native spill in the locked nightly candidate')
+    ask = sub.add_parser('query', help='Run one read-only engine statement on named Parquet files or local table pins',
+                         description='Rows print tab-separated in the statement\'s column order. Name every column '
+                                     'once: the engine keeps only the last of two columns of one name, so such a '
+                                     'statement is refused (SELECT k.sha, c.sha, or SELECT * over a join).')
+    ask.add_argument('sql', nargs='?', help='The statement (or --file)')
+    ask.add_argument('--file', type=Path, help='Read the statement from this SQL file')
+    ask.add_argument('--table', action='append', default=[], metavar='NAME=PATH',
+                     help='Bind NAME to a Parquet file, or to the exact table pin a .json file holds (repeatable)')
+    ask.add_argument('--explain', action='store_true', help='Print the logical and physical plans; nothing is run')
+    ask.add_argument('--analyze', action='store_true', help='With --explain: run it and print the plan with metrics')
+    ask.add_argument('--json', action='store_true', help="Print the engine's JSON instead of tab-separated rows")
+    ask.add_argument('--memory-gib', type=float, help='Engine memory for the query (default 2; never above the runtime)')
+    ask.add_argument('--work', type=Path,
+                     help='Keep the job in this new or empty folder (job.json, engine.log, result.json, '
+                          'and limits.json when a limit was lowered)')
     tests = sub.add_parser('test')
     tests.add_argument('lane', choices=config['lanes'], nargs='?', default='production-offline')
     tests.add_argument('--path', action='append', default=[], help='Restrict to a path or node within this lane (repeatable)')
     tests.add_argument('--shard', type=parse_shard, metavar='INDEX/COUNT',
                        help='Run one disjoint partition of the full lane (one-based; cannot combine with --path)')
+    refresh = sub.add_parser('refresh-shard-durations',
+                             help='Update .github/scripts/test-shard-durations.json from full-shard passing production-offline JUnit XMLs')
+    refresh.add_argument('xml', nargs='+', type=Path,
+                         help='Passing full-shard/full-file production-offline JUnit XML files in chronological order (never -k or ::node slices)')
+    refresh.add_argument('--merge', action='store_true',
+                         help='Keep existing enrolled production-offline entries not present in the supplied XML files')
+    refresh.add_argument('--out', type=Path, default=SHARD_DURATIONS_FILE)
     values = list(sys.argv[1:] if argv is None else argv)
     extra = []
     if '--' in values:
@@ -631,6 +781,22 @@ def main(argv=None):
                 clean_proof_work(args.proof_work, dry_run=is_dry_run)
         elif args.command == 'prepare-baseline':
             print('Baseline verified: ' + baseline(config, fetch=True))
+        elif args.command == 'query':
+            if (args.sql is None) == (args.file is None):
+                raise ValueError('Give the statement as an argument or with --file, not both')
+            if args.analyze and not args.explain:
+                raise ValueError('--analyze goes with --explain')
+            query(config, args.sql if args.file is None else args.file.read_text(), args.table, explain=args.explain,
+                  analyze=args.analyze, as_json=args.json, memory_gib=args.memory_gib, work=args.work)
+        elif args.command == 'refresh-shard-durations':
+            lane_roots = config['lanes']['production-offline']['roots']
+            enrolled = {item for item in inventory(config) if any(
+                item == root or item.startswith(root.rstrip('/') + '/') for root in lane_roots)}
+            existing = {k: v for k, v in load_shard_durations(args.out).items() if k in enrolled} if (
+                args.merge and args.out.exists()) else {}
+            updated = dict(sorted({**existing, **junit_shard_durations(args.xml, enrolled)}.items()))
+            args.out.write_text(json.dumps(updated, indent=2, sort_keys=True) + '\n')
+            print(f'Wrote {len(updated)} durations to {args.out}')
         else:
             return test(config, args.lane, args.path, extra, shard=args.shard)
     except (OSError, ValueError, subprocess.SubprocessError) as error:

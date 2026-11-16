@@ -220,7 +220,7 @@ def test_daily_budget_refuses_before_raw_inventory_or_cache_effects(tmp_path):
         def get_paginator(self,*_):raise AssertionError('Raw LIST before budget admission')
     class NeverNative:
         remote=None
-        def run_job(self,*_):raise AssertionError('Native work before budget admission')
+        def run_job(self,*_,log=None):raise AssertionError('Native work before budget admission')
     daily=dict(work=str(tmp_path/'daily'),decided_at='2026-10-28T12:00:00Z',catalog_root=str(tmp_path/'catalog'),
         tables={name:dict(namespace=['archive'],name=name) for name in ['captures','readings','filename_readings']},
         receipt_inventory=[],body_inventory=str(tmp_path/'unopened.parquet'),local_root=str(tmp_path/'raw'),
@@ -484,6 +484,10 @@ def test_execute_binds_matching_destination_and_records_actual_native_probe_comm
         assert 'timing is unverified for this release' in capfd.readouterr().err
     else:
         assert recorded==dict(status='owner-approved',basis='real-device',measured_release_id=None,timing='verified')
+    # The candidate folder says which runtime file, binary and limits built its model (ct-64t4).
+    from archive_job_fixture import runtime_ran
+    for name in ('model-intent.json','completed-model.json'):
+        assert json.loads((Path(value['work'])/name).read_text())['engine_runtime']==runtime_ran(runtime)
 
 
 @pytest.mark.parametrize('change',['catalog_account','catalog_bucket','warehouse','namespace','inline_secret','endpoint_override'])
@@ -628,7 +632,7 @@ def test_actual_execute_daily_path_publishes_only_completed_work(tmp_path,outcom
         def __exit__(self,*_):self.native.close()
         def __getattr__(self,name):return getattr(self.native,name)
         def create_file(self,request):return self.upload.create_file(request)
-        def run_job(self,path):
+        def run_job(self,path,log=None):
             job=json.loads(Path(path).read_text())
             if not job.get('table_operations'):return self.native.run_job(path)
             # Simulate the external catalog with an owned native local catalog.
@@ -869,6 +873,23 @@ def _interrupt_nightly_wrapper(tmp_path,spec_path,options,store,receipts,outcome
         assert store.objects[pointer]==selected and store.events.count(('put',pointer))==1
         pending=json.loads((active/'archive-daily/daily-summary.json').read_text())
         assert set(pending['receipt_keys'])>set(daily['receipt_keys'])
+
+
+def test_nightly_summary_carries_the_daily_status_and_html_backlog(tmp_path):
+    # ct-hiec: a carried html_metadata backlog is visible beside daily_status, not only in the candidate.
+    import runpy
+    record_daily=runpy.run_path(str(Path(__file__).resolve().parents[3]/'scripts/nightly_publish.py'))['record_daily']
+    report=tmp_path/'archive-daily/daily-summary.json'
+    report.parent.mkdir()
+    carried={'html_metadata':dict(bodies=3,stored_bytes=10,unknown_sizes=0,oldest_day='2026-11-08')}
+    report.write_text(json.dumps(dict(status='completed',carried=carried)))
+    summary={}
+    record_daily(summary,tmp_path)
+    assert summary=={'daily_status':'completed','daily_carried':carried}
+    report.write_text(json.dumps(dict(status='completed',carried=None)))
+    summary={}
+    record_daily(summary,tmp_path)
+    assert summary=={'daily_status':'completed'}
 
 
 def test_nightly_interrupted_retirement_cannot_leave_an_active_checkpoint(tmp_path,monkeypatch):
@@ -1208,3 +1229,71 @@ def test_a_first_release_cannot_name_link_history(tmp_path):
     path=tmp_path/'publish.json';path.write_text(json.dumps(value))
     with pytest.raises(ValueError,match='A first release has no link history'):
         load_spec(path)
+
+
+def test_the_shipped_daily_writes_every_capture_record_table_the_shipped_model_reads():
+    # 2026-11-09 (ct-85dm): the model read video_records while the scheduled daily did not name it.
+    # The weekly refresh replaced all 52 YouTube cache bodies, nothing read them, and the nightly
+    # refused at unsettled_video_records = 52. The fixtures above never read the shipped specs.
+    # Cannot see: the live table heads, the raw bodies, or backfill.json (which leaves video out).
+    from congress_api.lake.daily import DAILY_CAPTURE_RECORDS
+    jobs=Path(__file__).resolve().parents[3]/'model/jobs'
+    publish=json.loads((jobs/'publish.json').read_text())
+    model=json.loads((jobs/publish['model_spec']['path']).read_text())
+    tables=json.loads((jobs/publish['daily']['path']).read_text())['tables']
+    read={name for name in DAILY_CAPTURE_RECORDS if name in model}
+    assert read and read<=set(tables)
+    for name in read:
+        target='/'+'/'.join([*tables[name]['namespace'],tables[name]['name']])+'/metadata/'
+        assert target in model[name]['metadata_location'],name
+
+
+def test_execute_wires_retrying_receipt_client_when_automatic_causes_is_enabled(tmp_path,monkeypatch):
+    """ct-xyo9 (6): archive_publish_job.execute passes a configure_read_retries-wrapped receipt_client to
+    run_publish when automatic_causes=True (whether or not _daily built one first), while keeping single-attempt writes."""
+    from congress_api.retention import r2 as r2_mod
+    from docspec_client.client import NativeDatasets
+    from viewer_publication import archive_controller,archive_publish_job,producer_proof
+    from viewer_publication.archive_publish_job import execute,load_spec
+    from archive_job_fixture import real_model_spec
+    from test_archive_controller import Runtime as NativeTransport
+    from test_archive_publish import Store
+    value=publish_spec(tmp_path);model,_,_=real_model_spec(tmp_path)
+    remote=remote_config(tmp_path);store=Store()
+    runtime=tmp_path/'public-runtime.json';settings=json.loads(Path(os.environ['DOCSPEC_JOB_CONFIG']).read_text())
+    original=Path(os.environ['DOCSPEC_JOB_CONFIG']).parent
+    for field in ['binary','limits','workspace']:
+        if field in settings:settings[field]=str((original/settings[field]).resolve())
+    settings.update(remote=str(remote),credentials='/unopened/fake-credentials.json')
+    runtime.write_text(json.dumps(settings));model['engine_config']=str(runtime)
+    path=Path(value['model_spec']['path']);path.write_text(json.dumps(model));value['model_spec']=dict(path=str(path),**file_pin(path))
+    value.update(receipt_keys=['receipts/documents/2026-10-27/slice.jsonl.gz'],automatic_causes=True)
+    specpath=tmp_path/'publish.json';specpath.write_text(json.dumps(value))
+    class Runtime(NativeTransport):
+        def __init__(self,native,configuration):super().__init__(native,store);self.remote=Path(configuration['remote'])
+        def __enter__(self):return self
+        def __exit__(self,*_):self.native.close()
+    def runtime_factory(cfg_path):
+        return Runtime(NativeDatasets.from_config(os.environ['DOCSPEC_JOB_CONFIG']),json.loads(Path(cfg_path).read_text()))
+    storage_calls,wrapped=[],[]
+    def storage_factory(**kwargs):
+        client=object()
+        storage_calls.append((client,kwargs))
+        return client
+    monkeypatch.setattr(r2_mod,'configure_read_retries',lambda c:(wrapped.append(c) or ('retrying',c)))
+    monkeypatch.setattr(producer_proof,'find_records',lambda *a,**k:{})
+    monkeypatch.setattr(producer_proof,'require_producers',lambda *a,**k:None)
+    captured={}
+    def fake_run_publish(*args,**kwargs):
+        captured.update(kwargs)
+        return dict(status='published')
+    monkeypatch.setattr(archive_controller,'run_publish',fake_run_publish)
+    result=execute(load_spec(specpath),runtime_factory=runtime_factory,storage_factory=storage_factory,
+                   end_to_end_runner=END_TO_END_PASSED)
+    assert result==dict(status='published')
+    assert len(storage_calls)==2
+    assert all(k['retries']=={'total_max_attempts':1} for _,k in storage_calls)
+    assert captured['client'] is storage_calls[0][0]
+    assert captured['receipt_client']==('retrying',storage_calls[1][0])
+    assert wrapped==[storage_calls[1][0]]
+

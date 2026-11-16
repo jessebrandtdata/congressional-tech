@@ -1,0 +1,62 @@
+[
+  {
+    "id": "link_word_formats",
+    "kind": "link_word",
+    "pattern": "(?i)^(zip|pdf|html?|xml|docx?|txt|text|json|csv|xlsx?|pptx?|mp3|mp4)[.!:]*$",
+    "sample_id": "title-rules:link_word_formats"
+  },
+  {
+    "id": "link_word_actions",
+    "kind": "link_word",
+    "pattern": "(?i)^(click here|please click here|here|link|document|file|download|download file|download pdf|download testimony|download witness testimony|download executive business meeting results|view|view pdf|view testimony|open|read more|more|email|print|share|website|webpage|untitled|attachment|hearings?)[.!:]*$",
+    "sample_id": "title-rules:link_word_actions"
+  },
+  {
+    "id": "link_word_click_here",
+    "kind": "link_word",
+    "pattern": "(?i)^(please\\s+)?click\\s+here\\b",
+    "sample_id": "title-rules:link_word_click_here"
+  },
+  {
+    "id": "link_word_download",
+    "kind": "link_word",
+    "pattern": "(?i)^(?:download\\s+\\S|(?:view|open)\\s+(?:witness\\s+)?(?:testimony|statement|document|pdf|file|results)\\b)",
+    "sample_id": "title-rules:link_word_download"
+  },
+  {
+    "id": "link_word_format_size",
+    "kind": "link_word",
+    "pattern": "(?i)^[\\s\\W\\d_]*(?:(?:zip|pdf|html?|xml|docx?|txt|text|json|csv|xlsx?|pptx?|rtf|mp3|mp4|download|view|open|click|here|[kmg]i?b|bytes?)\\b[\\s\\W\\d_]*)+$",
+    "sample_id": "title-rules:link_word_format_size"
+  },
+  {
+    "id": "link_word_phrases",
+    "kind": "link_word",
+    "pattern": "(?i)^(printable\\s+(pdf|version)(\\s+of\\s+this\\s+(document|page))?|download\\s+(the\\s+)?(report|document|file|attachment))[.!:]*$",
+    "sample_id": "title-rules:link_word_phrases"
+  },
+  {
+    "id": "link_word_no_name",
+    "kind": "link_word",
+    "pattern": "(?i)^(?:[^\\p{L}]*|(?:nos?|number)[.]?[^\\p{L}]*[0-9][^\\p{L}]*|_[0-9]+(?:\\s*\\([^)]*\\)?[,;.!:]*)?)$",
+    "sample_id": "title-rules:link_word_no_name"
+  },
+  {
+    "id": "link_word_bill_placeholder",
+    "kind": "link_word",
+    "pattern": "(?i)^(?:(?:H\\.?\\s?R\\.?|S\\.|H\\.?\\s?Res\\.?|S\\.?\\s?Res\\.?|H\\.?\\s?J\\.?\\s?Res\\.?|S\\.?\\s?J\\.?\\s?Res\\.?|H\\.?\\s?Con\\.?\\s?Res\\.?|S\\.?\\s?Con\\.?\\s?Res\\.?)\\s*|S\\s+)_+(?:\\.[A-Za-z0-9]{2,5})?[,;.!:]*$",
+    "sample_id": "title-rules:link_word_bill_placeholder"
+  },
+  {
+    "id": "link_word_filename",
+    "kind": "link_word",
+    "pattern": "(?i)^\\S+\\.(?:pdf|docx?|xlsx?|pptx?|zip|xml|txt|csv|rtf)$",
+    "sample_id": "title-rules:link_word_filename"
+  },
+  {
+    "id": "label_alone",
+    "kind": "label",
+    "pattern": "(?i)^(?:witness\\s+(?:statement|testimony|biography)|(?:prepared|written)\\s+statement|testimony|biography|truth\\s+in\\s+testimony(?:\\s+form|\\s+disclosure(?:\\s+form)?)?)$",
+    "sample_id": "title-rules:label_alone"
+  }
+]

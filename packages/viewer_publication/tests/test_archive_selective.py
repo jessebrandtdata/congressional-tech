@@ -55,11 +55,15 @@ def sorted_rows(rows):
     return sorted(rows,key=lambda row:repr(sorted(row.items(),key=lambda item:item[0])))
 
 
-def test_filename_transition_reuses_values_and_records_the_producer(tmp_path):
+def test_filename_transition_reuses_values_and_records_the_producer(tmp_path, monkeypatch):
     from datetime import date
     from congress_api.lake import filenames, tables
-    from viewer_publication.archive_backfill_job import FILENAME_PRIOR_VERSION, load_spec
-    from viewer_publication.producer_proof import snapshot_reasons
+    from viewer_publication.archive_backfill_job import FILENAME_ACT_CITATION_VERSION, FILENAME_PRIOR_VERSION, load_spec
+    from viewer_publication.producer_proof import snapshot_reasons, versions_at
+
+    # Rehearse the historical Act-citation endpoint; attributing it to a later HEAD refuses.
+    assert filenames.current_version() != FILENAME_ACT_CITATION_VERSION
+    monkeypatch.setattr(filenames, 'current_version', lambda: FILENAME_ACT_CITATION_VERSION)
 
     runtime = os.environ['DOCSPEC_JOB_CONFIG']
     catalog = tmp_path / 'base-catalog'
@@ -88,12 +92,16 @@ def test_filename_transition_reuses_values_and_records_the_producer(tmp_path):
     report = execute(load_spec(spec_file))
     assert report['rows'] == 3 and report['reused'] == 1 and report['recomputed'] == 2
     rows = {row['filename']: row for row in pq.read_table(work / 'check' / 'filename-readings.parquet').to_pylist()}
-    assert rows[unaffected['filename']] == dict(unaffected, catalog_version=filenames.current_version())
+    assert rows[unaffected['filename']] == dict(unaffected, catalog_version=FILENAME_ACT_CITATION_VERSION)
     assert (rows[eps]['date_token'], rows[eps]['filename_date']) == ('1-12-16', date(2016, 1, 12))
     assert (rows[afwa]['date_token'], rows[afwa]['filename_date']) == ('6-23-20', None)
     producer = json.loads(Path(report['producer']['path']).read_text())
+    producing_commit = producer['commit']
     model = dict(filename_readings=report['selector'], catalog_version=report['catalog_version'], parser_versions={})
-    assert snapshot_reasons(model, {'filename_readings': producer}) == []
+    expected = ([] if versions_at(producing_commit)['filename_readings'] == FILENAME_ACT_CITATION_VERSION else [
+        f'producer proof: filename_readings: the code at {producing_commit[:12]} computes another version than the pinned rows carry'
+    ])
+    assert snapshot_reasons(model, {'filename_readings': producer}) == expected
 
 
 @pytest.mark.parametrize('basename,refused', [
@@ -462,15 +470,16 @@ def test_a_model_runtime_change_resumes_and_a_predicate_change_still_refuses(tmp
     spec=selective_spec(tmp_path,fixture,dict(captures=B),differential_rows=0,through='tables')
     assert execute(spec)['status']=='tables_built'
     # Defect guarded: identity covering the model runtime, so a retry with a new pool redoes D1-D4.
+    from archive_job_fixture import runtime_ran
+    from docspec_client.client import runtime_paths
     original=Path(os.environ['DOCSPEC_JOB_CONFIG']).resolve()
-    runtime=json.loads(original.read_text())
     # Preserve each path's meaning when the retry config moves to another directory.
-    for name in ('binary', 'workspace', 'limits'):
-        if name in runtime and not Path(runtime[name]).is_absolute():
-            runtime[name]=str((original.parent/runtime[name]).resolve())
+    runtime=runtime_paths(json.loads(original.read_text()),original.parent)
     other=tmp_path/'model-runtime.json';other.write_text(json.dumps(runtime))
     retry=dict(spec,resume=True,through='model',selective=dict(spec['selective'],model=dict(spec['selective']['model'],engine_config=str(other))))
     assert execute(retry)['status']=='built'
+    # The state keeps the record of the runtime the model ran under: the retry's (ct-64t4).
+    assert json.loads((Path(spec['work'])/'state.json').read_text())['model']['runtime']==runtime_ran(other)
     with pytest.raises(ValueError,match='identity changed'):
         execute(dict(spec,resume=True,selective=dict(spec['selective'],where=dict(captures=BOTH))))
 
@@ -669,6 +678,94 @@ def test_candidate_goes_through_the_controller_and_resumes_after_canary_failure(
     assert len(built)==1
 
 
+def test_step_9_model_build_passes_base_retired_ledger_matching_publisher(tmp_path,fixture,monkeypatch):
+    """ct-wzyo: when selective.model names ledger_base (or ledger), step 9 passes the retired-link ledger
+    the publisher derives from the base release, producing identical retired_links rows and release_id;
+    when neither is named, run.state['model']['ledger'] states explicitly that the build used an empty ledger."""
+    from hashlib import md5,sha256
+    from archive_job_fixture import fake_release
+    from test_archive_controller import Runtime
+    from test_archive_publish import Store
+    import viewer_publication.archive_controller as controller
+    import viewer_publication.archive_publish as archive_publish
+    from viewer_publication.archive_backfill_job import load_spec as load_backfill
+    from viewer_publication.archive_format import release_identity
+    from viewer_publication.archive_model_job import load_spec
+
+    # 1. Invalid ledger options refuse at load_spec before any effect.
+    spec_dir=tmp_path/'bad'
+    selective_spec(spec_dir,fixture,dict(captures=B),differential_rows=0)
+    raw_spec=json.loads((spec_dir/'spec.json').read_text())
+    bare_base=fake_release(tmp_path/'bare','a'*64,[('gone.pdf',b'gggggggg',[b'gggggggg'])],retired=None)
+    for bad,msg in [
+        (dict(ledger=str(tmp_path/'missing-ready')),'Ledger folder lacks prior_links.parquet'),
+        (dict(ledger_base=str(bare_base)),'has no retired_links'),
+        (dict(ledger=str(tmp_path/'r'),ledger_base=str(bare_base)),'ledger or ledger_base, not both'),
+    ]:
+        edited=dict(raw_spec,selective=dict(raw_spec['selective'],model=dict(raw_spec['selective']['model'],**bad)))
+        p=tmp_path/'bad-spec.json';p.write_text(json.dumps(edited))
+        with pytest.raises(ValueError,match=msg):load_backfill(p)
+        assert not (spec_dir/'work').exists()
+
+    # 2. Without ledger or ledger_base, state and report say explicitly that the ledger was empty.
+    empty_spec=selective_spec(tmp_path/'empty',fixture,dict(captures=B),differential_rows=0)
+    empty_report=execute(empty_spec)
+    empty_state=json.loads((Path(empty_spec['work'])/'state.json').read_text())
+    assert empty_state['model']['ledger']['empty'] is True
+    assert 'empty retired-link ledger' in empty_state['model']['ledger']['reason']
+    assert empty_report['ledger']==empty_state['model']['ledger']
+
+    # 3. With a base release carrying retired_links, step 9's retired_links rows and release_id equal the publisher's.
+    base_dir=fake_release(tmp_path/'base','0'*64,[('gone.pdf',b'gggggggg',[b'gggggggg'])],
+        retired=[dict(link_key=b'rrrrrrrr',successor_key=None,last_release_id='d'*64,last_filename='r.pdf')])
+    entries=[]
+    for f in sorted(base_dir.glob('*.parquet')):
+        data=f.read_bytes()
+        entries.append(dict(name=f.name,sha256=sha256(data).hexdigest(),md5=md5(data).hexdigest(),
+            size=len(data),rows=pq.read_metadata(f).num_rows))
+    base_id=release_identity(1,entries)
+    (base_dir/'manifest.json').write_text(json.dumps(dict(schema_version=1,files=entries,facet_counts=[],release_id=base_id)))
+
+    seeded_dir=tmp_path/'seeded'
+    selective_spec(seeded_dir,fixture,dict(captures=B),differential_rows=0)
+    seeded_json=json.loads((seeded_dir/'spec.json').read_text())
+    seeded_json['selective']['model']['ledger_base']=str(base_dir)
+    (seeded_dir/'spec.json').write_text(json.dumps(seeded_json))
+    spec=load_backfill(seeded_dir/'spec.json')
+    report=execute(spec)
+
+    store=Store()
+    for f in base_dir.iterdir():
+        store.objects[f'viewer-publications/releases/{base_id}/{f.name}']=f.read_bytes()
+    store.objects['viewer-publications/manifest.json']=json.dumps(dict(release_id=base_id,previous_release_id=None)).encode()
+    monkeypatch.setattr(archive_publish,'require_release_gates',lambda *a,**k:None)
+    candidate=Path(spec['work'])/'candidate-model.json'
+    publish=json.loads((Path(spec['work'])/'candidate-publish.json').read_text())
+    def passed(**ctx):return dict(status='passed',releaseId=ctx['release_id'],targets='owner-approved')
+    with NativeDatasets.from_config(os.environ['DOCSPEC_JOB_CONFIG']) as native:
+        pub_result=controller.run_publish(load_spec(candidate),canary=passed,contract=passed,
+            client=store,engine=Runtime(native,store),bucket='derived-fixture',work=tmp_path/'publish',
+            receipt_keys=publish['receipt_keys'],provenance=[],run={'id':'selective'},
+            public_origin='https://archive.fixture.test')
+    assert pub_result['status']=='published'
+    step9_retired=pq.read_table(Path(report['release'])/'retired_links.parquet').to_pylist()
+    pub_retired=pq.read_table(Path(spec['work'])/'candidate-output'/'retired_links.parquet').to_pylist()
+    assert step9_retired==pub_retired
+    assert {r['link_key'] for r in step9_retired}=={b'gggggggg',b'rrrrrrrr'}
+    assert report['release_id']==pub_result['release_id']
+    assert report['ledger']['source']=='ledger_base'
+
+    # 4. Resuming a completed empty-ledger run after adding ledger_base invalidates step 9 and rebuilds it.
+    empty_json=json.loads((tmp_path/'empty'/'spec.json').read_text())
+    empty_json['resume']=True
+    empty_json['selective']['model']['ledger_base']=str(base_dir)
+    (tmp_path/'empty'/'spec.json').write_text(json.dumps(empty_json))
+    resumed=execute(load_backfill(tmp_path/'empty'/'spec.json'))
+    assert resumed['executed'] is True
+    assert resumed['ledger']['source']=='ledger_base'
+    assert resumed['release_id']==pub_result['release_id']
+
+
 def test_the_selective_job_records_the_producer_of_every_snapshot_it_pins(tmp_path,fixture,monkeypatch):
     """Gate 5 refused spec-run's D1-D4 candidate: nothing wrote a producer record. The job that
     made the snapshots now writes them, named honestly, and pins them in candidate-publish.json."""
@@ -785,7 +882,7 @@ def test_historical_record_only_replay_preserves_rows_but_refuses_head_producer_
     spec_path = tmp_path/'record-only.json'
     spec_path.write_text(json.dumps(dict(version=1, work=str(work), engine_config=os.environ['DOCSPEC_JOB_CONFIG'],
         record_only=dict(base_model=pin(model), bases=bases, raw_root=str(raw), raw_mirror=str(mirror),
-            max_work_items=2, meeting_selection=pin(selection)))))
+            max_work_items=2, meeting_selection=pin(selection), replay_sources=['mods', 'senate_page']))))
     spec = load_spec(spec_path)
     assert plan(spec)['executed'] is False and not work.exists()
     result = execute(spec)['tables']
@@ -826,6 +923,88 @@ def test_record_only_meeting_transition_refuses_unreviewed_versions_before_base_
     monkeypatch.setattr(backfill, '_base_keys', reject_base)
     with pytest.raises(ValueError, match='reviewed document-reference transition'):
         backfill._meetings(None, prior, None)
+
+
+def test_record_only_appearances_replay_exactly_the_sources_whose_version_moved(monkeypatch):
+    from viewer_publication import archive_record_backfill as backfill
+
+    current = dict(congress_gov='c1', house_xml='h1', senate_page='s1', mods='m2')
+    assert backfill._moved_sources(current, dict(current, mods='m1'), ['mods']) == {'mods'}
+    assert backfill._moved_sources(current, dict(current, mods='m1', senate_page='s0'),
+                                   ['senate_page', 'mods']) == {'mods', 'senate_page'}
+    with pytest.raises(ValueError, match='name different sources: youtube'):
+        backfill._moved_sources(current, dict(current, mods='m1', youtube='y1'), ['mods'])
+    with pytest.raises(ValueError, match='name different sources: house_xml'):
+        backfill._moved_sources(current, {k: v for k, v in current.items() if k != 'house_xml'}, ['mods'])
+    # The move must be exactly the reviewed one, in both directions.
+    with pytest.raises(ValueError, match=r"moved sources \['mods', 'senate_page'\] differ from the reviewed replay_sources \['mods'\]"):
+        backfill._moved_sources(current, dict(current, mods='m1', senate_page='s0'), ['mods'])
+    with pytest.raises(ValueError, match=r"moved sources \['mods'\] differ"):
+        backfill._moved_sources(current, dict(current, mods='m1'), ['mods', 'senate_page'])
+    # Congress.gov rows are built from inline receipt lines, which a stored-body replay cannot read.
+    with pytest.raises(ValueError, match='cannot replay inline-built sources: congress_gov'):
+        backfill._moved_sources(current, dict(current, congress_gov='c0'), ['congress_gov'])
+    # Refused before any base row is examined (the caller has already loaded the base file):
+    # nothing moved, an unreviewed move, an inline source.
+    monkeypatch.setattr(backfill, '_base_keys', lambda *a, **k: pytest.fail('a refused replay examined the base rows'))
+    monkeypatch.setattr(appearance_records, 'current_versions', lambda: dict(current))
+    for prior, reviewed, refusal in ((dict(current), ['mods'], 'no source producer version moved'),
+                                     (dict(current, mods='m1'), ['senate_page'], 'differ from the reviewed'),
+                                     (dict(current, congress_gov='c0'), ['congress_gov'], 'inline-built')):
+        with pytest.raises(ValueError, match=refusal):
+            backfill._appearances(None, prior, reviewed, directory=None)
+
+
+def test_record_only_mods_move_replays_mods_and_promotes_older_rows_to_the_new_columns(tmp_path):
+    """The lake's older table lacks committees/committee_members: its rows come through verbatim with them null."""
+    from hashlib import sha256
+
+    from congress_api.retention.provenance import file_pin
+    from viewer_publication.archive_backfill_job import load_spec
+
+    def pin(path):
+        return dict(path=str(path), **file_pin(path))
+
+    mirror, raw = tmp_path/'mirror', tmp_path/'raw'
+    raw.mkdir()
+    current = appearance_records.current_versions()
+    prior = dict(current, mods='older-mods')
+    body = (b'<mods xmlns="http://www.loc.gov/mods/v3"><titleInfo><title>Hearing</title></titleInfo>'
+            b'<extension><congCommittee authorityId="SSAP00" chamber="S" congress="114" type="S">'
+            b'<name type="authority-standard">Senate Appropriations</name></congCommittee></extension></mods>')
+    mods_sha = sha256(body).hexdigest()
+    dest = mirror/'bodies'/'sha256'/mods_sha[:2]/mods_sha
+    dest.parent.mkdir(parents=True)
+    dest.write_bytes(body)
+    rows = [dict(record_sha=mods_sha if source == 'mods' else sha256(source.encode()).hexdigest(), source=source,
+                 parser_version=version, status='completed', appearances=[]) for source, version in prior.items()]
+    base_table = appearance_records.table(rows).drop_columns(['committees', 'committee_members'])
+    base = tmp_path/'appearances.parquet'
+    pq.write_table(base_table, base)
+    model = tmp_path/'model.json'
+    model.write_text(json.dumps(dict(appearance_records=dict(kind='parquet', **pin(base)),
+        parser_versions=dict(appearance_records=prior), unreadable_files=[])))
+    spec_path = tmp_path/'record-only.json'
+    job = dict(base_model=pin(model), bases=dict(appearance_records=pin(base)), raw_root=str(raw),
+               raw_mirror=str(mirror), max_work_items=1)
+    spec = dict(version=1, work=str(tmp_path/'work'), engine_config=os.environ['DOCSPEC_JOB_CONFIG'], record_only=job)
+    # The reviewed move is part of the spec: an appearance replay without it is refused at load.
+    spec_path.write_text(json.dumps(spec))
+    with pytest.raises(ValueError, match='reviewed replay_sources'):
+        load_spec(spec_path)
+    spec_path.write_text(json.dumps(dict(spec, record_only=dict(job, replay_sources=['mods']))))
+    result = execute(load_spec(spec_path))['tables']['appearance_records']
+    assert (result['reused_rows'], result['appended'], result['replayed_sources']) == (4, 1, ['mods'])
+    out = pq.read_table(result['selector']['path'])
+    assert out.schema.names == appearance_records.ARROW_SCHEMA.names
+    by_key = {(r['record_sha'].hex(), r['parser_version']): r for r in out.to_pylist()}
+    assert len(by_key) == 5
+    for row in base_table.to_pylist():
+        assert by_key[(row['record_sha'].hex(), row['parser_version'])] == dict(row, committees=None, committee_members=None)
+    replayed = by_key[(mods_sha, current['mods'])]
+    assert (replayed['status'], replayed['committees']) == ('completed', ['ssap00'])
+    proof = json.loads(Path(result['producer']['path']).read_text())
+    assert (proof['reused_rows'], proof['appended'], proof['replayed_sources']) == (4, 1, ['mods'])
 
 
 def test_record_only_retained_committee_checks_custody_and_returns_only_append_rows(tmp_path):

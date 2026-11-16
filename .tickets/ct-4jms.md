@@ -1,8 +1,8 @@
 ---
 id: ct-4jms
-status: in_progress
+status: closed
 deps: []
-links: [cefr-xjsp, cef-96wc, ct-tk10, ct-ud0b, ct-1l1h, ct-98sm, ct-v967, ct-rie2, ct-5kto, ct-082q, ct-hiec, ct-q4e2, ct-0mqc]
+links: [cefr-xjsp, cef-96wc, ct-tk10, ct-ud0b, ct-1l1h, ct-98sm, ct-v967, ct-rie2, ct-5kto, ct-082q, ct-hiec, ct-q4e2, ct-0mqc, ct-saqg, ct-z4w5, ct-6v77, ct-5cdu]
 created: 2026-10-30T14:32:31Z
 type: task
 priority: 1
@@ -63,7 +63,7 @@ The code side is ready on claude/ct-thread1-unattended. capture-archive.yml reli
 
 - The ct-4jms acceptance list: release, profile and url_state identity, budgets, emitted receipt keys, stored MD5 and suffix against the stored objects, receipt-referenced body existence, zero old-index reads, and the Ashley disposition.
 - The ct-q4e2 done condition: at least one meeting dated after the previous release is in the nightly's release.
-- If the nightly stops at `derived_budget_required`, more than 64 MiB (or 5,000 bodies) of new HTML arrived since the last read. That still needs a supervised scoped run (`daily.produce_html_metadata`) or a raised budget. It is the one remaining non-unattended case for ct-hiec.
+- If more than 64 MiB (or 5,000 bodies) of new HTML arrived since the last read, the nightly reads the oldest budget's worth and carries the rest (ct-hiec); `summary.json` shows `daily_carried`. `derived_budget_required` now means a body's stored size is still unknown after custody (local reads), which needs a supervised scoped run (`daily.produce_html_metadata`).
 - If the relist step fails, read the uploaded summary or log. The capture step still ran, and the next day's 7-day window repeats the missed days.
 
 ## Notes
@@ -129,3 +129,31 @@ Independent review: APPROVE for the scoped work; remaining ticket acceptance is 
 **2026-11-09T16:34:36Z**
 
 2026-11-09: added the Runbook section (owner enables, first-run expectations, checks). Code on claude/ct-thread1-unattended: capture-archive.yml relists the last 7 days of committee meetings before the budgeted capture, and capture runs even if the relist fails (tests in .github/tests/test_archive_workflows.py). No workflow was enabled or dispatched. Scheduled-run acceptance stays open.
+
+**2026-11-10T13:27:30Z**
+
+2026-11-10: the Mac nightly publisher is back on its schedule (05:30 local) and proven unattended: run 20261110T121530.896579Z, status ok, release_unchanged (ct-xnn6). Hosted scheduled capture is still off: the repository lacks the two capture secrets (ARCHIVE_CAPTURE_R2_ACCESS_KEY_ID, ARCHIVE_CAPTURE_R2_SECRET_ACCESS_KEY), which only the owner can create; then 'gh workflow enable capture-archive.yml'. The owner chose 'Both automatic' for capture and publishing on 2026-11-10.
+
+**2026-11-10T13:54:46Z**
+
+2026-11-10 owner decision (questions dialog, about 13:55Z): 'Just use the local keys' for the two hosted capture secrets, i.e. the same storage key pair the Mac nightly uses (fields DOCSPEC_S3_ACCESS_KEY_ID and DOCSPEC_S3_SECRET_ACCESS_KEY of the remote runtime's credentials file). The orchestrator does not handle secret values, so the owner runs the two 'gh secret set' commands; the workflow is then enabled (it is disabled_manually; ARCHIVE_CAPTURE_ENABLED is already true). Follow-up worth doing later: a narrower capture-only key, since the hosted job then holds the nightly's key.
+
+**2026-11-10T14:23:02Z**
+
+2026-11-10 capture run on the Mac (owner: 'Turn on and run capture'; hosted secrets still absent), mirroring capture-archive.yml at af1da283 with the nightly driver's environment; runner and evidence .cache/archive-release/capture-20261110/apply-20261110T140152Z/. Meetings relist (7 days): 38 receipts, 35 Congress.gov meeting details, run 20261110T140153Z-6b3c368e77f8. Budgeted capture against release 619db5f9e08e: run 20261110T140311Z-06d91c83c2d8, 2,000 requests (budget reached), 1,032 receipts, 285.9 MB fetched, 1,027 HTTP 200, 5 HTTP 410 (budget.house.gov), 3 refused as outside scope (admin-* hosts), 8 discovery jobs refused, no paid provider, queue was 41,887. Hosts: democrats-edworkforce 799, agriculture 134, democrats-agriculture 42, armedservices 40, budget 17. This is a hand run, not the scheduled-run acceptance; that still needs the two secrets and the hosted workflow.
+
+**2026-11-10T20:39:29Z**
+
+2026-11-10 release 77673bfb8fcf published the results of a capture run by hand on this Mac (run 20261110T140311Z-06d91c83c2d8: 2,000 requests, 1,032 receipts), not a scheduled hosted run. The cause record attributes 392 new documents to it (197 new bytes, 195 already in raw). Acceptance still needs the scheduled capture-archive.yml run, which waits on the owner's two hosted secrets.
+
+**2026-11-11T14:40:09Z**
+
+validated 2026-11-11, left open: waits on the owner's two hosted secrets. Checked today with gh: workflow 'Capture archive sources' (399669501) is still disabled_manually, no ARCHIVE_CAPTURE_* secret is listed at repository level, and capture-archive.yml has no runs. The only captures so far are hand runs on the Mac (2026-11-10 14:03Z, published in 77673bfb8fcf). Remains: the owner runs the two 'gh secret set' commands, then 'gh workflow enable capture-archive.yml', then one scheduled run checked against this ticket's list. Related finding, recorded on ct-lft6: receipts under receipts/owner/* are not in publish-daily.json's receipt_families, so the nightly never reads them.
+
+**2026-11-12T21:45:32Z**
+
+2026-11-12 owner decision (15:06-05:00): a forced workflow_dispatch capture plus a manual Mac nightly counts as Wave 7 acceptance; schedules (03:23 UTC capture, 05:30 local nightly) stay enabled. Evidence: hosted capture-archive.yml run 43302430173 (event workflow_dispatch, main 9924b385, environment archive-capture with ARCHIVE_CAPTURE_R2_* secrets set 14:50-05:00) green in 22m47s; meetings relist 20261112T204014Z-4f9efb076145 + budgeted capture 20261112T204110Z-fc2d35e98d37 from release 750a2a24d00a (2,000 requests, 1,085 captures, 152 MB). Nightly 20261112T210256Z ingested 1,142 new receipts and refused at the gate; cause record model/jobs/release-causes/750a2a24d00a-6c46b8f7a606.json (55 groups, evidence .cache/archive-release/investigations/capture-night-20261112/) committed 0695e4ba; resume 20261112T213624Z published 6c46b8f7a606 at 21:40Z (unpin + notes f5cbc687, docs/releases/2026-11-12-6c46b8f7a606.md). Hosted MCP pinned (ca808760), version 8b2ed383, smoke green on 6c46b8f7a606. Published release adds 21 meetings dated after Release 5 (e.g. 119589, 119594, 119596, 119597, 338823-338832; dated 2026-11-17..19). Not yet observed: an event=schedule run; the first one is tonight 03:23 UTC.
+
+**2026-11-13T15:00:26Z**
+
+2026-11-13: the first unattended event=schedule run passed: capture-archive.yml run 43415806696 on main e0168d26, green 11:17-11:34Z. GitHub started the 03:23 UTC cron about 8 hours late, so it landed after the 10:30Z Mac nightly (status ok, nothing new). Its receipts are read by hosted publish run 43448096066 (workflow_dispatch, archive-jobs.yml), dispatched 2026-11-13 14:59Z.

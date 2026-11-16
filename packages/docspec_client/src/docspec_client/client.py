@@ -1,8 +1,8 @@
 """Main client interface for native DocSpec operations and dataset custody."""
 import base64
 from collections.abc import Generator, Mapping, Sequence
-from contextlib import contextmanager
-from hashlib import file_digest
+from contextlib import contextmanager, nullcontext
+from hashlib import file_digest, sha256
 import json
 import math
 import os
@@ -86,6 +86,111 @@ def _cleanup_dataset_client(host: Host, responses: set[Any]) -> None:
 
 
 _VERIFIED_BINARY_CACHE: dict[tuple[str, int, int, int], tuple[str, bytes]] = {}
+
+#: The runtime file's fields that name files, each resolved against the runtime file's own folder. The one list:
+#: from_config, and the pipeline's model-only build (which copies a runtime) and publisher (which reads its remote
+#: configuration), resolve them through runtime_paths (ct-64t4).
+RUNTIME_PATH_FIELDS = ('binary', 'workspace', 'remote', 'limits', 'credentials')
+_RUNTIME_FIELDS = {'version', *RUNTIME_PATH_FIELDS, 'timeout_seconds', 'source_revision', 'platform',
+                   'build_features', 'binary_sha256', 'required_capabilities'}
+
+
+def runtime_paths(settings: Mapping[str, Any], base: Path | str) -> dict[str, Any]:
+    """`settings` with each path field it holds made absolute against `base`, the runtime file's folder."""
+    resolved = dict(settings)
+    for name in RUNTIME_PATH_FIELDS:
+        if name in resolved:
+            value = resolved[name]
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f'DocSpec runtime requires an explicit {name} path')
+            resolved[name] = str((Path(base) / value).resolve())
+    return resolved
+
+
+def _read_runtime(path: Path | str) -> tuple[Path, bytes, dict[str, Any]]:
+    """A runtime file's resolved path, its bytes and its settings with every path field absolute."""
+    p = Path(path).resolve()
+    data = p.read_bytes()
+    settings = json.loads(data)
+    if (not isinstance(settings, dict) or settings.get('version') != 1
+            or type(settings.get('version')) is not int or set(settings) - _RUNTIME_FIELDS):
+        raise ValueError('Invalid DocSpec runtime configuration')
+    for name in ('binary', 'workspace'):
+        if name not in settings:
+            raise ValueError(f'DocSpec runtime requires an explicit {name} path')
+    return p, data, runtime_paths(settings, p.parent)
+
+
+def _binary_digest(binary: Path) -> tuple[str, bytes]:
+    """The binary's sha256 and first four bytes, read once per path, inode, mtime and size in this process."""
+    st = binary.stat()
+    cache_key = (str(binary), st.st_ino, st.st_mtime_ns, st.st_size)
+    cached = _VERIFIED_BINARY_CACHE.get(cache_key)
+    if cached is None:
+        with binary.open('rb') as source:
+            header = source.read(4)
+            source.seek(0)
+            cached = (file_digest(source, 'sha256').hexdigest(), header)
+        if len(_VERIFIED_BINARY_CACHE) < 32:
+            _VERIFIED_BINARY_CACHE[cache_key] = cached
+    return cached
+
+
+#: A job whose named runtime file is absent or missing runs under the file this variable names (choose_runtime).
+RUNTIME_FALLBACK_ENV = 'DOCSPEC_RUNTIME_CONFIG'
+#: Backfill, import and maintenance fall back to the local job runtime only when neither a spec path nor RUNTIME_FALLBACK_ENV is set.
+JOB_FALLBACK_ENV = 'DOCSPEC_JOB_CONFIG'
+
+
+def choose_runtime(named: Path | str | None = None, *, job_fallback: bool = False) -> tuple[Path | str | None, dict[str, Any]]:
+    """The runtime file a job runs under, and how it was chosen, for runtime_record.
+
+    When `named` is given: `named`, unless `job_fallback` is false, the named file is absent on disk, and
+    RUNTIME_FALLBACK_ENV names one. When `named` is omitted: RUNTIME_FALLBACK_ENV when set and non-empty; else,
+    when `job_fallback` is true, JOB_FALLBACK_ENV when set and non-empty (ct-64t4, ct-rax4).
+    """
+    fallback = os.environ.get(RUNTIME_FALLBACK_ENV)
+    has_named = named is not None and (not isinstance(named, str) or bool(named.strip()))
+    if has_named:
+        if not job_fallback and not Path(named).exists() and fallback:
+            return fallback, dict(chosen='fallback', named=str(named),
+                                  reason=f'no runtime file at the named path; {RUNTIME_FALLBACK_ENV} names this one')
+        return named, dict(chosen='named', named=str(named), reason=None)
+    if fallback and fallback.strip():
+        return fallback, dict(chosen='fallback', named=None,
+                              reason=f'no runtime file named; {RUNTIME_FALLBACK_ENV} names this one')
+    if job_fallback:
+        job = os.environ.get(JOB_FALLBACK_ENV)
+        if job and job.strip():
+            return job, dict(
+                chosen='fallback', named=None,
+                reason=f'no runtime file named and {RUNTIME_FALLBACK_ENV} is unset; {JOB_FALLBACK_ENV} names this one',
+            )
+    return None, dict(chosen=None, named=None, reason=None)
+
+
+def runtime_record(path: Path | str, choice: Mapping[str, Any], *, log: Any = None) -> dict[str, Any]:
+    """What a job runs under, for its evidence: `choice` (choose_runtime's), the runtime file `path` and the binary
+    and limits it names, each by absolute path and the sha256 of its bytes read now, and the limits' values (None
+    for a runtime without limits).
+
+    The paths resolve as from_config resolves them, so they are what the client hands the engine; the binary is
+    hashed from its bytes (once per process, shared with verify_runtime), never taken from the file's own
+    binary_sha256. With `log`, the record is also written there as one `[docspec-runtime] ` JSON line.
+    It cannot see: a job's limits narrowed later from this runtime (the pipeline's provenance.bounded_engine
+    writes a lowered limits file per job), a change to the limits file after this reading (the engine rereads
+    it on every call; nothing re-checks it during a run), or the values the engine actually applies.
+    """
+    p, data, settings = _read_runtime(path)
+    binary = Path(settings['binary'])
+    record = dict(choice, runtime=dict(path=str(p), sha256=sha256(data).hexdigest()),
+                  binary=dict(path=str(binary), sha256=_binary_digest(binary)[0]), limits=None)
+    if 'limits' in settings:
+        limits = Path(settings['limits']).read_bytes()
+        record['limits'] = dict(path=settings['limits'], sha256=sha256(limits).hexdigest(), values=json.loads(limits))
+    if log is not None:
+        print('[docspec-runtime] ' + json.dumps(record, sort_keys=True), file=log, flush=True)
+    return record
 
 
 class NativeDatasets:
@@ -226,18 +331,7 @@ class NativeDatasets:
         binary = Path(self.binary)
         if not binary.is_file() or not os.access(binary, os.X_OK):
             raise ValueError('The configured native binary is missing or not executable')
-        st = binary.stat()
-        cache_key = (str(binary), st.st_ino, st.st_mtime_ns, st.st_size)
-        cached = _VERIFIED_BINARY_CACHE.get(cache_key)
-        if cached is not None:
-            actual_sha, header = cached
-        else:
-            with binary.open('rb') as source:
-                header = source.read(4)
-                source.seek(0)
-                actual_sha = file_digest(source, 'sha256').hexdigest()
-            if len(_VERIFIED_BINARY_CACHE) < 32:
-                _VERIFIED_BINARY_CACHE[cache_key] = (actual_sha, header)
+        actual_sha, header = _binary_digest(binary)
         if expected_sha is not None and actual_sha != expected_sha:
             raise ValueError('The configured native binary is missing or differs from its approved SHA-256')
         if target_platform == 'linux-amd64' and not header.startswith(b'\x7fELF'):
@@ -257,32 +351,16 @@ class NativeDatasets:
     @classmethod
     def from_config(cls, path: Path | str) -> 'NativeDatasets':
         """Load explicit paths and remote secrets without connecting or writing."""
-        p = Path(path).resolve()
-        settings = json.loads(p.read_text())
-        fields = {'version', 'binary', 'workspace', 'remote', 'limits',
-                  'credentials', 'timeout_seconds', 'source_revision',
-                  'platform', 'build_features', 'binary_sha256',
-                  'required_capabilities'}
-        if (not isinstance(settings, dict) or settings.get('version') != 1
-                or type(settings.get('version')) is not int or set(settings) - fields):
-            raise ValueError('Invalid DocSpec runtime configuration')
-
-        def location(name: str) -> Path:
-            value = settings.get(name)
-            if not isinstance(value, str) or not value.strip():
-                raise ValueError(f'DocSpec runtime requires an explicit {name} path')
-            return (p.parent / value).resolve()
-
+        p, _, settings = _read_runtime(path)
         timeout = settings.get('timeout_seconds', 120)
         if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
             raise ValueError('DocSpec runtime timeout must be a positive finite number')
-        remote = location('remote') if 'remote' in settings else None
-        limits = location('limits') if 'limits' in settings else None
+        remote = Path(settings['remote']) if 'remote' in settings else None
         client = cls(
-            location('binary'),
-            location('workspace'),
+            settings['binary'],
+            settings['workspace'],
             remote=remote,
-            limits=limits,
+            limits=settings.get('limits'),
             timeout=timeout,
             source_revision=settings.get('source_revision'),
             platform=settings.get('platform'),
@@ -298,7 +376,9 @@ class NativeDatasets:
                            or re.fullmatch(r'DOCSPEC_[A-Z0-9_]+', name) is None
                            for name in references.values())):
                 raise ValueError('Remote secrets require explicit DOCSPEC_ environment references')
-            credential_path = location('credentials')
+            if 'credentials' not in settings:
+                raise ValueError('DocSpec runtime requires an explicit credentials path')
+            credential_path = Path(settings['credentials'])
             if credential_path.stat().st_mode & 0o077:
                 raise ValueError('DocSpec credentials require private file permissions (0600)')
             credentials = json.loads(credential_path.read_text())
@@ -329,7 +409,7 @@ class NativeDatasets:
         return any(value is not None for value in (
             self.binary_sha256, self.platform, self.source_revision, self.build_features))
 
-    def _call(self, *args: Any, remote: bool = False) -> Any:
+    def _call(self, *args: Any, remote: bool = False, log: Path | str | None = None) -> Any:
         if self._closed:
             raise RuntimeError('DocSpec client is closed')
         if self._has_runtime_pins():
@@ -337,9 +417,16 @@ class NativeDatasets:
         command = [*self._command(remote=remote), *map(str, args)]
         environment = ({'env': {**os.environ, **self._remote_secrets}}
                        if remote and self.remote is not None and self._remote_secrets else {})
-        result = subprocess.run(command, capture_output=True, text=True,
-                                timeout=self.timeout, **environment)
+        # The engine writes straight into `log`, so it can be followed during the run and outlives a timeout or kill.
+        with nullcontext(subprocess.PIPE) if log is None else open(log, 'wb') as stderr:
+            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=stderr, text=True,
+                                    timeout=self.timeout, **environment)
         if result.returncode:
+            if log is not None:
+                try:  # The engine's failure is the error raised, whatever became of its log.
+                    result.stderr = Path(log).read_text(encoding='utf-8', errors='replace')
+                except OSError:
+                    result.stderr = ''
             raise DocSpecFailure(command, result)
         return json.loads(result.stdout) if result.stdout.strip() else None
 
@@ -443,9 +530,13 @@ class NativeDatasets:
     def run(self, request: Any) -> Any:
         return self._request('/run', request)
 
-    def run_job(self, spec: Path | str) -> dict[str, Any]:
-        """Run a declarative SQL job through the verified executable adapter."""
-        return self._run_spec('job', spec)
+    def run_job(self, spec: Path | str, *, log: Path | str | None = None) -> dict[str, Any]:
+        """Run a declarative SQL job through the verified executable adapter.
+
+        ``log`` names a file that receives the engine's stderr (its metric lines and any
+        error) as it is produced; ``docspec_client.metric_events`` reads the events back.
+        """
+        return self._run_spec('job', spec, log=log)
 
     def create_file(self, spec: Path | str) -> dict[str, Any]:
         """Transfer a known file once through the native create-only adapter."""
@@ -453,12 +544,12 @@ class NativeDatasets:
             raise ValueError('create-file requires explicit remote configuration')
         return self._run_spec('create-file', spec)
 
-    def _run_spec(self, command: str, spec: Path | str) -> dict[str, Any]:
+    def _run_spec(self, command: str, spec: Path | str, *, log: Path | str | None = None) -> dict[str, Any]:
         if self.limits is None:
             raise ValueError(f'{command} requires explicit host limits')
         if self.binary_sha256 is None or self.source_revision is None:
             raise ValueError(f'{command} requires binary and source revision pins')
-        return self._call(command, '--spec', Path(spec).resolve(), remote=True)
+        return self._call(command, '--spec', Path(spec).resolve(), remote=True, log=log)
 
     def run_ipc(
         self,

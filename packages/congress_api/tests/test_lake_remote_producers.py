@@ -19,7 +19,7 @@ class RecordingEngine:
         self.binary_sha256=native.binary_sha256 if native else 'a'*64
         self.jobs=[]
 
-    def run_job(self,path):
+    def run_job(self,path,log=None):
         job=json.loads(Path(path).read_text())
         if not job.get('table_operations'):
             assert self.native is not None
@@ -48,7 +48,8 @@ def test_remote_create_and_append_preserve_native_jobs_and_uri(tmp_path):
     assert create['table_operations'][1]['schema']==schema
     operation=append['table_operations'][0]
     assert operation['kind']=='append' and operation['table']==table
-    assert 'LEFT ANTI JOIN existing' in operation['sql']
+    assert 'FROM incoming LEFT SEMI JOIN existing' in operation['sql']
+    assert ') existing RIGHT ANTI JOIN incoming' in operation['sql']
     assert "encode(cast(\"body_sha\" AS BYTEA),'hex')" in operation['identity_sql']
     assert append['inputs']==[dict(name='incoming',kind='parquet',path=str(source))]
 

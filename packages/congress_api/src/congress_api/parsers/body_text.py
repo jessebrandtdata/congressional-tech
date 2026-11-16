@@ -16,23 +16,27 @@ page rule's injection point and the bounds around it:
   leaves that body on the work list (§6.6: the version names its OCR engine).
 - **Failed pages.** A page whose extraction fails is recorded in ``failed_pages`` and the
   reading is an ``error`` with no text: a partial text is never passed as complete.
-- **Deadlines.** A per-page deadline runs inside the worker (``SIGALRM``, main thread only);
-  it can interrupt Python code between bytecodes, not one long native call, which the
-  supervisor's document deadline bounds instead.
+- **Deadlines.** A per-page user-CPU deadline runs inside the worker (``ITIMER_VIRTUAL`` /
+  ``SIGVTALRM``, main thread only), so stopping or sleeping does not spend it; it can interrupt
+  Python code between bytecodes, not one long native call, which the supervisor's document
+  deadline bounds instead.
 
 Cost: O(B) in the body's bytes per rule; the PDF branch holds the body and one page's
 objects at a time, plus the page texts (O(T)) that GPO normalization reads as a whole.
 """
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 import gzip
 import hashlib
 import importlib
 import io
+import json
 import platform
+import resource
 import signal
 import subprocess
 import threading
+import traceback
 import zlib
 
 from congress_api.parsers.archive_readings import fingerprint
@@ -54,6 +58,10 @@ class OcrRequired(Exception):
     """A page needs OCR and this strategy has no engine: the body stays on the work list."""
 
 
+class CheckpointError(RuntimeError):
+    """A supplied page checkpoint failed; the body has no source-reading verdict."""
+
+
 class PageDeadline(Exception):
     """One page outlived the in-worker deadline: a resource failure, retried once (§6)."""
 
@@ -68,6 +76,7 @@ class Reading:
     ocr_pages: tuple[int, ...] = ()
     macos_build: str | None = None
     fields: dict = field(default_factory=dict)
+    diagnostic: str | None = None
 
     def row(self):
         """The readings columns §6.2 lets a body-text parser fill, with ``fields`` as strings."""
@@ -91,21 +100,90 @@ def page_offsets(pages):
     return tuple(offsets)
 
 
-def markup_text(data, parser):
-    """``html_text``/``xml_text``: spicy-docs' markup reader, ``<pre>`` layout kept; one page."""
+def _native_geometry_error(error):
+    """Older maintained readers report geometry with the general ExtractionError."""
+    from spicy_docs import extraction
+    return isinstance(error, getattr(extraction, 'NativeGeometryError', ()))
+
+
+def _persisted_extraction_error(error):
+    """Keep the declared PDF failure family while diagnostics gain a typed reason."""
+    return 'ExtractionError' if _native_geometry_error(error) else type(error).__name__
+
+
+def markup_text(data, parser, *, select_publisher_content=False):
+    """Read markup with spicy-docs; publisher selection is a separately versioned opt-in."""
     from spicy_docs.extraction.body_text import rendition_text
+    selection = None
+    selection_evidence = None
+    rendition = None
+    if select_publisher_content:
+        if parser != 'html_text':
+            raise ValueError('Publisher content selection requires html_text')
+        from congress_api.parsers.congress_bill_content import select_congress_bill_content
+        from congress_api.parsers.congress_legislative_content import POLICY, select_congress_legislative_content
+        if select_publisher_content is True:
+            selection = select_congress_bill_content(data)
+        elif select_publisher_content == POLICY:
+            selection = select_congress_legislative_content(data)
+        else:
+            raise ValueError('Unknown publisher content selection policy')
+        selection_evidence = None if selection is None else dict(selection.evidence)
+        if selection is not None and selection.body is not None:
+            try:
+                rendition = rendition_text(selection.body, rendition=selection.evidence['rendition'])
+                if not rendition.text.strip():
+                    rendition = None
+                    selection_evidence.update(outcome='fallback', reason=(
+                        'empty_selected_bill' if select_publisher_content is True else 'empty_selected_content'))
+            except (ValueError, UnicodeError, RecursionError):
+                selection_evidence.update(outcome='fallback', reason=(
+                    'unreadable_selected_bill' if select_publisher_content is True else 'unreadable_selected_content'))
     try:
-        text = rendition_text(data, rendition=MARKUP_RENDITIONS[parser]).text
+        if rendition is None:
+            rendition = rendition_text(data, rendition=MARKUP_RENDITIONS[parser])
     except (ValueError, UnicodeError, RecursionError) as error:  # BodyTextError and MarkupReadError are ValueErrors
-        return Reading('error', type(error).__name__)
-    return Reading('completed', text=text, page_offsets=(0,), fields=dict(page_count=1))
+        error_fields = {} if selection_evidence is None else dict(
+            source_sha256=hashlib.sha256(data).hexdigest(),
+            content_selection=json.dumps(selection_evidence, sort_keys=True, separators=(',', ':')))
+        return Reading('error', type(error).__name__, fields=error_fields, diagnostic=traceback.format_exc(limit=8))
+    fields = dict(page_count=1, source_sha256=hashlib.sha256(data).hexdigest(),
+                  markup_cleanup=json.dumps(asdict(rendition.record), sort_keys=True, separators=(',', ':')))
+    if selection_evidence is not None:
+        selection_evidence['output_rendition'] = rendition.rendition
+        fields['content_selection'] = json.dumps(selection_evidence, sort_keys=True, separators=(',', ':'))
+    for name in ('source_encoding', 'encoding_basis'):
+        value = getattr(rendition.record, name, None)
+        if value is not None: fields[name] = value
+    return Reading('completed', text=rendition.text, page_offsets=(0,), fields=fields)
 
 
 @dataclass(frozen=True)
 class PageRule:
-    """The page strategy and the reader that renders for it (None: DocumentExtractor's default)."""
+    """A page policy with optional exact-source/page replacements.
+
+    Overrides inherit this rule's reader. They are candidate extraction policies,
+    not quality acceptance; the caller still qualifies the resulting body.
+    """
     strategy: object
     reader: object = None
+    checkpoint_identity: dict | None = None
+    page_overrides: dict = field(default_factory=dict)
+
+    def __post_init__(self):
+        for source, pages in self.page_overrides.items():
+            if not isinstance(source, str) or len(source) != 64 or any(c not in '0123456789abcdef' for c in source):
+                raise ValueError('Page overrides require an exact lowercase source SHA-256')
+            if not pages:
+                raise ValueError('Page overrides require explicit page replacements')
+            for number, replacement in pages.items():
+                if type(number) is not int or number < 1:
+                    raise ValueError('Page override numbers must be positive integers')
+                if not isinstance(replacement, PageRule) or replacement.reader is not None or replacement.page_overrides:
+                    raise ValueError('Page replacements must be leaf PageRules inheriting the document reader')
+
+    def overrides_for(self, source_sha256):
+        return self.page_overrides.get(source_sha256, {})
 
 
 class NoEngine:
@@ -126,15 +204,25 @@ def gpo_page(text):
     return normalize_gpo_pages([text])[0][0]
 
 
-def page_rule(backend, reader=None):
+def page_rule(backend, reader=None, *, checkpoint_identity=None):
     """The declared routing over ``backend``: spicy-docs ``NativeOrOcr`` on GPO-normalized text."""
     from spicy_docs.extraction import NativeOrOcr
-    return PageRule(NativeOrOcr(backend, min_chars=OCR_MIN_CHARS, normalize=gpo_page), reader)
+    return PageRule(NativeOrOcr(backend, min_chars=OCR_MIN_CHARS, normalize=gpo_page), reader, checkpoint_identity)
 
 
 def native_only():
     """The default page rule: the declared routing with no OCR engine."""
-    return page_rule(NoEngine())
+    return page_rule(NoEngine(), checkpoint_identity=dict(backend='none', reader='DefaultReader', dpi=200,
+                                                         raw_rgb=False))
+
+
+def recovery_apple_vision():
+    """The same 200 DPI Vision rule, admitted by worker memory rather than a pixel exclusion."""
+    rule = apple_vision()
+    rule.reader.max_pixels = (1 << 63) - 1
+    identity = (None if rule.checkpoint_identity is None else
+                dict(rule.checkpoint_identity, max_pixels=rule.reader.max_pixels))
+    return PageRule(rule.strategy, rule.reader, identity)
 
 
 def apple_vision():
@@ -146,8 +234,10 @@ def apple_vision():
     from spicy_docs.extraction import DefaultReader
     from spicy_docs.extraction.ocr import AppleVision
     backend = AppleVision(recognition_level='accurate', language_correction=False, bands=OCR_BANDS)
-    backend.require_reproducible_identity()
-    return page_rule(backend, DefaultReader(dpi=OCR_DPI, raw_rgb=True))
+    identity = backend.require_reproducible_identity()
+    reader = DefaultReader(dpi=OCR_DPI, raw_rgb=True)
+    return page_rule(backend, reader, checkpoint_identity=dict(backend=identity, reader='DefaultReader',
+        dpi=OCR_DPI, raw_rgb=True, max_pixels=reader.max_pixels))
 
 
 def load_page_rule(spec):
@@ -159,23 +249,34 @@ def load_page_rule(spec):
 
 @contextmanager
 def page_deadline(seconds, page_number):
-    """Raise :class:`PageDeadline` in this thread after ``seconds``; off outside the main thread.
+    """Raise :class:`PageDeadline` in this thread after ``seconds`` of user CPU; off outside the main thread.
 
-    ``SIGALRM`` reaches Python only between bytecodes, so one long native call runs to its end
-    (the supervisor's document deadline bounds that). The previous handler is always restored.
+    ``ITIMER_VIRTUAL`` measures process user-mode CPU time only, so a stop (``SIGSTOP``) or sleep
+    never spends the deadline, while ``ParserWorker``'s outer 1,800 s ``time.monotonic()`` deadline
+    bounds wall-clock and XPC/Vision stalls. Any previous virtual timer (less user CPU spent here)
+    and handler are always restored.
     """
     if not seconds or threading.current_thread() is not threading.main_thread():
         yield
         return
     def expire(*_):
         raise PageDeadline(page_number)
-    previous = signal.signal(signal.SIGALRM, expire)
+    # ITIMER_VIRTUAL counts process user-mode CPU; ParserWorker's 1,800s time.monotonic() bounds wall/XPC stalls.
+    started_utime = resource.getrusage(resource.RUSAGE_SELF).ru_utime
+    previous_handler = signal.signal(signal.SIGVTALRM, expire)
+    previous_timer = (0.0, 0.0)
     try:
-        signal.setitimer(signal.ITIMER_REAL, seconds)
+        previous_timer = signal.setitimer(signal.ITIMER_VIRTUAL, seconds)
         yield
     finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, previous)
+        signal.signal(signal.SIGVTALRM, signal.SIG_IGN)
+        signal.setitimer(signal.ITIMER_VIRTUAL, 0)
+        signal.signal(signal.SIGVTALRM, previous_handler)
+        if any(previous_timer):
+            spent = max(0.0, resource.getrusage(resource.RUSAGE_SELF).ru_utime - started_utime)
+            delay = max(0.001, previous_timer[0] - spent) if previous_timer[0] > 0 else 0.0
+            if delay > 0 or previous_timer[1] > 0:
+                signal.setitimer(signal.ITIMER_VIRTUAL, delay or previous_timer[1], previous_timer[1])
 
 
 class _PageRun:
@@ -185,31 +286,82 @@ class _PageRun:
     11 MB) goes straight back to the extractor and is not held.
     """
 
-    def __init__(self, strategy, deadline_seconds):
+    def __init__(self, strategy, deadline_seconds, evidence=None, *, overrides=None, source_sha256=None):
         self.strategy, self.deadline = strategy, deadline_seconds
+        self.overrides, self.source_sha256 = overrides or {}, source_sha256
+        self.evidence = evidence
         self.ocr, self.failed, self.errors, self.builds = [], [], {}, set()
+        self.diagnostics = {}
 
     def extract(self, page):
         from spicy_docs.extraction import PageContent
+        if self.evidence:
+            self.evidence(dict(event='page_started', page=page.number))
         try:
             with page_deadline(self.deadline, page.number):
-                content = self.strategy.extract(page)
+                replacement = self.overrides.get(page.number)
+                if replacement is not None and self.evidence:
+                    self.evidence(dict(event='page_override', page=page.number, source_sha256=self.source_sha256,
+                                       policy=replacement.checkpoint_identity))
+                content = (replacement.strategy if replacement is not None else self.strategy).extract(page)
         except (OcrRequired, PageDeadline, MemoryError):
             raise
         except Exception as error:  # one page's own failure; the reading records it
             self.failed.append(page.number)
-            self.errors[page.number] = type(error).__name__
+            self.errors[page.number] = _persisted_extraction_error(error)
+            self.diagnostics[page.number] = traceback.format_exc(limit=8)
+            if self.evidence:
+                event=dict(event='page_failed', page=page.number, error_type=type(error).__name__, error=str(error))
+                if _native_geometry_error(error):
+                    event.update(native_geometry_reason=error.reason,native_geometry_details=error.details)
+                self.evidence(event)
             return PageContent((), ())
+        self.observe(content, page.number)
+        return content
+
+    def observe(self, content, number):
+        """Apply the same OCR accounting to newly extracted and matched retained pages."""
         replaced = [o for o in content.observations if o.id != 'native'
                     or any(issue.code == REPLACED_ISSUE for issue in o.issues)]
         if replaced:
-            self.ocr.append(page.number)
+            self.ocr.append(number)
             self.builds.update(o.configuration.get('macos_build') for o in replaced
                                if isinstance(o.configuration, dict) and o.configuration.get('macos_build'))
-        return content
+        if self.evidence:
+            observations = []
+            for observation in content.observations:
+                # Raw recognizer objects can contain rasters or provider objects.
+                # Preserve text, geometry and reasons without retaining image bytes.
+                geometry = None
+                if observation.id == 'native' and isinstance(observation.raw, dict):
+                    geometry = [dict(box=line.get('bbox'), direction=line.get('dir'), writing_mode=line.get('wmode'))
+                                for block in observation.raw.get('blocks', []) for line in block.get('lines', [])]
+                retained = dict(id=observation.id, text=observation.text,
+                    configuration=observation.configuration, blocks=[asdict(b) for b in observation.blocks],
+                    issues=[asdict(issue) for issue in observation.issues], native_reader_line_geometry=geometry)
+                if observation.id == 'native' and isinstance(observation.raw, dict) and any(
+                        issue.code == 'native-geometry-refused' for issue in observation.issues):
+                    retained['native_geometry_details'] = {
+                        key: observation.raw[key] for key in ('page', 'line', 'display_bbox', 'geometry')
+                        if key in observation.raw}
+                observations.append(retained)
+            self.evidence(dict(event='page_extracted', page=number, pre_cleanup_text=content.text,
+                pre_cleanup_nonspace_chars=sum(not c.isspace() for c in content.text),
+                ocr=bool(replaced), observations=observations))
 
 
-def pdf_text(data, *, strategy, page_deadline_seconds):
+class _PageOverrideExtractor:
+    """Use the maintained extractor's range validation with CT's shared page accounting."""
+
+    def __init__(self, extractor, run):
+        self.extractor, self.run = extractor, run
+
+    def extract(self, source, *, media_type, pages=None):
+        overrides = {number: self.run for number in self.run.overrides if pages is None or number in pages}
+        return self.extractor.extract(source, media_type=media_type, pages=pages, overrides=overrides)
+
+
+def pdf_text(data, *, strategy, page_deadline_seconds, evidence=None, checkpoint=None):
     """``pdf_text``: one open of the PDF, each page through the rule, then GPO normalization.
 
     ``strategy`` is a :class:`PageRule` or a bare page strategy (rendered by the default reader).
@@ -218,19 +370,36 @@ def pdf_text(data, *, strategy, page_deadline_seconds):
     from spicy_docs.extraction import DocumentExtractor
     from spicy_docs.extraction.body_text import rendition_text
     rule = strategy if isinstance(strategy, PageRule) else PageRule(strategy)
-    run = _PageRun(rule.strategy, page_deadline_seconds)
+    source_sha256 = hashlib.sha256(data).hexdigest() if rule.page_overrides or checkpoint is not None else None
+    run = _PageRun(rule.strategy, page_deadline_seconds, evidence,
+                   overrides=rule.overrides_for(source_sha256), source_sha256=source_sha256)
+    extractor = DocumentExtractor(run, reader=rule.reader, max_input_bytes=max(1, len(data)))
+    if run.overrides:
+        extractor = _PageOverrideExtractor(extractor, run)
+    if checkpoint is not None:
+        extractor = checkpoint(extractor, rule, run)
     try:
-        body = rendition_text(data, rendition='pdf', extractor=DocumentExtractor(
-            run, reader=rule.reader, max_input_bytes=max(1, len(data))))
-    except (OcrRequired, PageDeadline, MemoryError):
+        body = rendition_text(data, rendition='pdf', extractor=extractor)
+    except (OcrRequired, PageDeadline, MemoryError, CheckpointError):
         raise
     except Exception as error:  # an unopenable, encrypted or pageless document
-        return Reading('error', type(error).__name__)
+        return Reading('error', _persisted_extraction_error(error), diagnostic=traceback.format_exc(limit=8))
     pages = len(body.pages)
+    if evidence:
+        for page, (text, cleanup) in enumerate(zip(body.pages, body.record.pages), start=1):
+            evidence(dict(event='page_normalized', page=page, cleanup=asdict(cleanup),
+                retained_nonspace_chars=sum(not c.isspace() for c in text), retained_utf8_bytes=len(text.encode()),
+                retained_text_sha256=hashlib.sha256(text.encode()).hexdigest()))
+        evidence(dict(event='document_cleanup', line_numbers=body.record.line_numbers,
+            gpo_footers=body.record.gpo_footers, spacing_normalized=body.record.spacing_normalized,
+            running_footer_lines=body.record.running_footer_lines, small_caps_merges=body.record.small_caps_merges,
+            hyphen_rejoin_count=body.record.hyphen_rejoin_count,
+            font_glyphs=[asdict(glyph) for glyph in body.record.font_glyphs]))
     if run.failed:
         return Reading('error', 'failed_pages', fields=dict(
             page_count=pages, failed_pages=run.failed,
-            failed_page_errors=sorted(set(run.errors.values()))))
+            failed_page_errors=sorted(set(run.errors.values()))), diagnostic='\n'.join(
+                f'Page {page}: {error}' for page, error in run.diagnostics.items()))
     if len(run.builds) > 1:
         raise ValueError('OCR in one document ran on more than one macOS build')
     # The build the OCR backend states (AppleVision's configuration), else this host's.
@@ -279,19 +448,20 @@ def warc_payload(data, *, max_bytes):
 def _decoded(payload, encoding, max_bytes):
     if encoding == 'deflate':
         stream = zlib.decompressobj()
-        data = stream.decompress(payload, max_bytes + 1)
+        data = stream.decompress(payload, 0 if max_bytes is None else max_bytes + 1)
     else:
         with gzip.GzipFile(fileobj=io.BytesIO(payload)) as stream:
-            data = stream.read(max_bytes + 1)
-    return None if len(data) > max_bytes else data
+            data = stream.read() if max_bytes is None else stream.read(max_bytes + 1)
+    return None if max_bytes is not None and len(data) > max_bytes else data
 
 
-def derive(data, parser, *, strategy, page_deadline_seconds, sniff_format, max_bytes):
+def derive(data, parser, *, strategy, page_deadline_seconds, sniff_format, max_bytes, evidence=None, checkpoint=None):
     """One body's reading under ``parser``. ``sniff_format(bytes)`` names a WARC payload's format."""
     if parser in MARKUP_RENDITIONS:
         return markup_text(data, parser)
     if parser == 'pdf_text':
-        return pdf_text(data, strategy=strategy, page_deadline_seconds=page_deadline_seconds)
+        return pdf_text(data, strategy=strategy, page_deadline_seconds=page_deadline_seconds, evidence=evidence,
+                        checkpoint=checkpoint)
     if parser != 'warc':
         raise ValueError('Unsupported body-text parser')
     try:
@@ -302,8 +472,10 @@ def derive(data, parser, *, strategy, page_deadline_seconds, sniff_format, max_b
     inner = PAYLOAD_PARSERS.get(kind)
     if inner is None:
         return Reading('error', 'unsupported_payload', fields=dict(envelope, payload_format=kind))
+    if evidence:
+        evidence(dict(event='warc_payload', parser=inner, payload_sha256=hashlib.sha256(payload).hexdigest()))
     reading = derive(payload, inner, strategy=strategy, page_deadline_seconds=page_deadline_seconds,
-                     sniff_format=sniff_format, max_bytes=max_bytes)
+                     sniff_format=sniff_format, max_bytes=max_bytes, evidence=evidence, checkpoint=checkpoint)
     return Reading(reading.status, reading.error_type, reading.text, reading.page_offsets, reading.ocr_pages,
                    reading.macos_build, dict(reading.fields, **envelope, payload_format=kind,
-                        payload_sha256=hashlib.sha256(payload).hexdigest()))
+                        payload_sha256=hashlib.sha256(payload).hexdigest()), reading.diagnostic)

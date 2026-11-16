@@ -9,6 +9,45 @@ SPICY_GENERATIONS={'amendments':'6'*64,'bill-family':'3'*64,'committee-rosters':
                    'members':'2'*64,'nominations':'4'*64,'roll-call-votes':'5'*64}
 
 
+class _Submitted(Exception):
+    pass
+
+
+class _Capture:
+    """Records the job the build submits instead of running it."""
+    def __init__(self, engine, path):
+        self.engine, self.path = engine, path
+
+    def __getattr__(self, name):
+        return getattr(self.engine, name)
+
+    def run_job(self, path, log=None):
+        import shutil
+        shutil.copy(path, self.path)
+        raise _Submitted
+
+
+def fake_release(directory, release_id, rows, retired=None, addresses=None):
+    """rows: [(filename, primary_key, [keys])]; only the files the ledger reads.
+    addresses: [(list_row, url)] source addresses."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    directory.mkdir(parents=True)
+    addresses = addresses or []
+    pq.write_table(pa.table({'list_row': pa.array([r for r, _ in addresses], pa.int32()), 'url': [u for _, u in addresses],
+                             'member_path': pa.array([None] * len(addresses), pa.string())}), directory / 'sources.parquet')
+    pq.write_table(pa.table({'filename': [r[0] for r in rows]}), directory / 'list.parquet')
+    pq.write_table(pa.table({'link_key': pa.array([r[1] for r in rows], pa.binary(8))}), directory / 'detail.parquet')
+    links = [(key, i) for i, r in enumerate(rows) for key in r[2]]
+    pq.write_table(pa.table({'link_key': pa.array([k for k, _ in links], pa.binary(8)),
+                             'list_row': pa.array([i for _, i in links], pa.int32())}), directory / 'links.parquet')
+    if retired is not None:
+        from viewer_publication.release_gate import RETIRED
+        pq.write_table(pa.Table.from_pylist(retired, schema=RETIRED), directory / 'retired_links.parquet')
+    (directory / 'manifest.json').write_text(json.dumps({'release_id': release_id}))
+    return directory
+
+
 def spicy_input(generations=None,**tables):
     """In-memory spicy-regs input: every table stated, absent ones as explicitly empty rows."""
     from viewer_publication.archive_model import SPICY_SCHEMAS
@@ -48,6 +87,40 @@ def spicy_pin(directory,**tables):
 def versions():
     from congress_api.lake import readings,filenames
     return {p:readings.current_version(p) for p in ['sniff','html','xml','json']},filenames.current_version()
+
+
+#: The Mac's real model limits (PLAN "Limits in force"), never the local test limits a pytest session runs under.
+MAC_LIMITS=dict(compute_threads=2,memory_bytes=25769803776,scratch_bytes=68719476736,batch_rows=8192,
+                max_batch_bytes=67108864,max_metadata_bytes=134217728)
+
+
+def constructed_runtime(folder,*,limits=MAC_LIMITS,**settings):
+    """A runtime file naming a stand-in binary (never run) and limits beside it, both relative to its folder."""
+    from pathlib import Path
+    folder=Path(folder);binary=folder/'bin'/'docspec';binary.parent.mkdir(parents=True)
+    binary.write_bytes(b'\xcf\xfa\xed\xfe stand-in engine for '+folder.name.encode());binary.chmod(0o755)
+    (folder/'limits.json').write_text(json.dumps(limits))
+    runtime=folder/'runtime.json'
+    runtime.write_text(json.dumps(dict(version=1,binary='bin/docspec',limits='limits.json',workspace='workspace',
+                                       timeout_seconds=60,**settings)))
+    return runtime
+
+
+_SELF = object()
+
+
+def runtime_ran(runtime,*,named=_SELF):
+    """What a run under `runtime` must record, read here from the files themselves: the file (a fallback when the
+    spec `named` another, missing, one or omitted `engine_config`; its reason is the test's to check), the binary
+    and limits it names resolved against its folder, each with the sha256 of its bytes, and the limits' values."""
+    from pathlib import Path
+    runtime=Path(runtime).resolve();settings=json.loads(runtime.read_text())
+    binary,limits=((runtime.parent/settings[name]).resolve() for name in ('binary','limits'))
+    digest=lambda path:hashlib.sha256(path.read_bytes()).hexdigest()
+    chosen=(dict(chosen='named',named=str(runtime),reason=None) if named is _SELF
+            else dict(chosen='fallback',named=None if named is None else str(named)))
+    return dict(chosen,runtime=dict(path=str(runtime),sha256=digest(runtime)),binary=dict(path=str(binary),sha256=digest(binary)),
+                limits=dict(path=str(limits),sha256=digest(limits),values=json.loads(limits.read_text())))
 
 
 def model_spec(tmp_path):

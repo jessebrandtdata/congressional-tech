@@ -496,3 +496,439 @@ def test_null_urls_removed_from_the_candidate_are_not_reported_as_persisting(tmp
     groups = counts(result, 'sources')
     assert groups[('NULL url', 'defect: a published source address must not be null')] == -2
     assert not any('also present' in name for name, _ in groups)
+
+
+# ct-syp1: the weekly video cache refresh rewrites every citation of a cache file.
+TS = pa.timestamp('us', tz='UTC')
+VIDEO_SCHEMAS = dict(SCHEMAS, channels=[('handle', S), ('title', S), ('record_sha', B)],
+                     videos=[('video_key', S), ('handle', S), ('title', S), ('duration_seconds', I),
+                             ('details_checked_at', TS), ('record_sha', B)],
+                     recording_matches=[('match_id', S), ('video_key', S), ('basis', S), ('source_ref', S)])
+# Written out, not imported: a reworded cause changes every recorded group id.
+CHURN = 'only the file citation moved: every content column equal on the row'
+CITED = "citation follows the video's record_sha: every other column equal on the row"
+PLAIN = 'value differs on matched key'
+
+
+def file_hash(name):
+    return sha256(name.encode()).digest()
+
+
+def cited(name):
+    return 'video_records:' + file_hash(name).hex()
+
+
+def video_release(directory, files, checked, *, change=None, schemas=VIDEO_SCHEMAS):
+    """Two cache files (`files` names this fetch of each) holding channels @a and @b, and @c; `api`
+    is a video read from an API record, which no refresh rewrites. `change(tables)` plants a value."""
+    from datetime import datetime, timezone
+    first, second = files
+    at = datetime(2026, 11, checked, tzinfo=timezone.utc)
+    video = lambda key, handle, source: dict(video_key=key, handle=handle, title=key, duration_seconds=60,
+                                             details_checked_at=at, record_sha=file_hash(source))
+    tables = dict(
+        channels=[dict(handle=h, title=h, record_sha=file_hash(f)) for h, f in (('@a', first), ('@b', first), ('@c', second))],
+        videos=[video('a1', '@a', first), video('a2', '@a', first), video('b1', '@b', first), video('c1', '@c', second),
+                dict(video('api', '@a', 'api-record'), details_checked_at=datetime(2026, 10, 1, tzinfo=timezone.utc))],
+        recording_matches=[dict(match_id='m1', video_key='a1', basis='video_states_event_id', source_ref=cited(first)),
+                           dict(match_id='m2', video_key='c1', basis='video_states_event_id', source_ref=cited(second)),
+                           dict(match_id='m3', video_key=None, basis='curated', source_ref='recording_decisions:d1')])
+    if change:
+        change(tables)
+    return release(directory, documents=['A'], schemas=schemas, **tables)
+
+
+def refresh(tmp_path, change=None, *, files=('new-1', 'new-2'), checked=8, schemas=VIDEO_SCHEMAS):
+    prev = video_release(tmp_path / 'prev', ('old-1', 'old-2'), 1)
+    live = video_release(tmp_path / 'live', files, checked, change=change, schemas=schemas)
+    _, result = run(tmp_path, prev, live)
+    return result
+
+
+def test_a_cache_refresh_that_changes_no_content_is_proven_without_a_record(tmp_path):
+    result = refresh(tmp_path)
+    assert counts(result, 'channels') == {('changed record_sha', CHURN): 3}
+    assert counts(result, 'videos') == {('changed record_sha', CHURN): 4, ('changed details_checked_at', CHURN): 4}
+    assert counts(result, 'recording_matches') == {('changed source_ref', CITED): 2}
+    assert result['ok'] and result['failing'] == []
+
+
+def row(tables, name, key):
+    return next(r for r in tables[name] if key in r.values())
+
+
+def plant(name, key, **values):
+    return lambda tables: row(tables, name, key).update(values)
+
+
+@pytest.mark.parametrize('change,table,expected', [
+    # A changed title or duration is its own group, and the row's citation is not proven either.
+    (plant('videos', 'a1', title='A new title'), 'videos',
+     {('changed record_sha', CHURN): 3, ('changed details_checked_at', CHURN): 3, ('changed record_sha', PLAIN): 1,
+      ('changed details_checked_at', PLAIN): 1, ('changed title', PLAIN): 1}),
+    (plant('videos', 'c1', duration_seconds=61), 'videos',
+     {('changed record_sha', CHURN): 3, ('changed details_checked_at', CHURN): 3, ('changed record_sha', PLAIN): 1,
+      ('changed details_checked_at', PLAIN): 1, ('changed duration_seconds', PLAIN): 1}),
+    # One row cites a hash that is not its channel's file.
+    (plant('videos', 'a2', record_sha=file_hash('not-a-file')), 'videos',
+     {('changed record_sha', CHURN): 3, ('changed details_checked_at', CHURN): 3, ('changed record_sha', PLAIN): 1,
+      ('changed details_checked_at', PLAIN): 1}),
+    # The check time went backwards or was emptied: an older file was read, not a newer one.
+    (plant('videos', 'b1', details_checked_at=None), 'videos',
+     {('changed record_sha', CHURN): 3, ('changed details_checked_at', CHURN): 3, ('changed record_sha', PLAIN): 1,
+      ('changed details_checked_at', PLAIN): 1}),
+    # An API-sourced row that now cites a cache file changed its source, not its file.
+    (plant('videos', 'api', record_sha=file_hash('new-1')), 'videos',
+     {('changed record_sha', CHURN): 4, ('changed details_checked_at', CHURN): 4, ('changed record_sha', PLAIN): 1}),
+    # A changed channel proves nothing for itself or for the videos that cite its file through it.
+    (plant('channels', '@a', title='Renamed'), 'channels', {('changed record_sha', CHURN): 2, ('changed record_sha', PLAIN): 1, ('changed title', PLAIN): 1}),
+    (plant('channels', '@a', title='Renamed'), 'videos',
+     {('changed record_sha', CHURN): 2, ('changed details_checked_at', CHURN): 2, ('changed record_sha', PLAIN): 2,
+      ('changed details_checked_at', PLAIN): 2}),
+    # A match re-pointed at another video, citing another video's file, or citing another decision.
+    (plant('recording_matches', 'm1', video_key='a2'), 'recording_matches',
+     {('changed source_ref', CITED): 1, ('changed source_ref', PLAIN): 1, ('changed video_key', PLAIN): 1}),
+    (plant('recording_matches', 'm1', source_ref=cited('new-2')), 'recording_matches',
+     {('changed source_ref', CITED): 1, ('changed source_ref', PLAIN): 1}),
+    (plant('recording_matches', 'm3', source_ref='recording_decisions:d2'), 'recording_matches',
+     {('changed source_ref', CITED): 2, ('changed source_ref', PLAIN): 1}),
+    # Added and removed rows are never part of the proof.
+    (lambda tables: tables['videos'].append(dict(tables['videos'][0], video_key='a3')), 'videos',
+     {('changed record_sha', CHURN): 4, ('changed details_checked_at', CHURN): 4, ('added keys', 'no evidence given'): 1}),
+    (lambda tables: tables['recording_matches'].pop(0), 'recording_matches',
+     {('changed source_ref', CITED): 1, ('removed keys', 'no evidence given'): -1}),
+])
+def test_a_planted_change_beside_a_cache_refresh_is_not_proven(tmp_path, change, table, expected):
+    result = refresh(tmp_path, change)
+    assert counts(result, table) == expected
+    assert not result['ok'] and {g['file'] for g in result['failing']} >= {f'{table}.parquet'}
+
+
+def test_an_earlier_check_time_is_not_a_refresh(tmp_path):
+    result = refresh(tmp_path, checked=1, change=lambda tables: [v.update(details_checked_at=v['details_checked_at'].replace(month=10))
+                                                                  for v in tables['videos'] if v['video_key'] != 'api'])
+    assert counts(result, 'videos') == {('changed record_sha', PLAIN): 4, ('changed details_checked_at', PLAIN): 4}
+
+
+def test_two_cache_files_folded_into_one_hash_prove_nothing(tmp_path):
+    result = refresh(tmp_path, files=('new-1', 'new-1'))
+    assert counts(result, 'channels') == {('changed record_sha', PLAIN): 3}
+    assert counts(result, 'videos') == {('changed record_sha', PLAIN): 4, ('changed details_checked_at', PLAIN): 4}
+    # A match's citation is judged against its own video's hash only; the video rows carry the finding.
+    assert counts(result, 'recording_matches') == {('changed source_ref', CITED): 2}
+
+
+# The independent review's cases (investigations/gate-rules-20261110/review/REVIEW.md).
+@pytest.mark.parametrize('files', [
+    ('old-2', 'old-1'),  # P4e: two files swapped
+    ('old-2', 'new-2'),  # P4d: one file's rows now cite another channel's old file
+])
+def test_a_citation_the_live_release_already_holds_is_not_a_refresh(tmp_path, files):
+    result = refresh(tmp_path, files=files)
+    moved = 1 if files[1] == 'new-2' else 0  # channel @c and its video still went to a hash nobody cited
+    assert counts(result, 'channels') == {k: v for k, v in {('changed record_sha', CHURN): moved, ('changed record_sha', PLAIN): 3 - moved}.items() if v}
+    assert counts(result, 'videos') == {k: v for k, v in {
+        ('changed record_sha', CHURN): moved, ('changed details_checked_at', CHURN): moved,
+        ('changed record_sha', PLAIN): 4 - moved, ('changed details_checked_at', PLAIN): 4 - moved}.items() if v}
+
+
+def test_a_check_time_in_the_future_is_not_a_refresh(tmp_path):
+    """P6/E4: every check date set to 2099. A check is a past event; the gate's clock bounds it."""
+    result = refresh(tmp_path, change=lambda tables: [v.update(details_checked_at=v['details_checked_at'].replace(year=2099))
+                                                      for v in tables['videos'] if v['video_key'] != 'api'])
+    assert counts(result, 'videos') == {('changed record_sha', PLAIN): 4, ('changed details_checked_at', PLAIN): 4}
+    assert counts(result, 'channels') == {('changed record_sha', CHURN): 3}
+
+
+def test_the_check_time_bound_is_the_moment_of_comparison(tmp_path):
+    from datetime import datetime, timezone
+    prev = video_release(tmp_path / 'prev', ('old-1', 'old-2'), 1)
+    live = video_release(tmp_path / 'live', ('new-1', 'new-2'), 8)
+    proven = lambda now: {g['group'] for g in release_diff.compare(prev, live, now=now)['files']['videos.parquet']['groups'] if g['status'] == 'verified'}
+    assert proven(datetime(2026, 11, 8, tzinfo=timezone.utc)) == {'changed record_sha', 'changed details_checked_at'}
+    assert proven(datetime(2026, 11, 7, 23, 59, tzinfo=timezone.utc)) == set()
+
+
+def test_a_column_with_no_partner_stops_the_cache_refresh_proof(tmp_path):
+    wider = dict(VIDEO_SCHEMAS, videos=[*VIDEO_SCHEMAS['videos'], ('transcript', S)])
+    result = refresh(tmp_path, schemas=wider)
+    assert counts(result, 'videos') == {('changed record_sha', PLAIN): 4, ('changed details_checked_at', PLAIN): 4}
+    assert 'videos.transcript: new in the candidate; no base values to compare' in result['cannot_see']
+
+
+# ct-4qld: a live link key must reach a row that serves the live file or the file the key names.
+LINK_SCHEMAS = dict(SCHEMAS, detail=[('saved_body', B), ('alternates', pa.list_(pa.struct([('body', B)])))],
+                    recoveries=[('list_row', I), ('body', B), ('recovered_url', S), ('kind', S)])
+
+
+def body(letter):
+    """The file whose body key is `key(letter)`: a link key is the first 8 bytes of its body's SHA-256."""
+    return key(letter) + b'\0' * 24
+
+
+def served(directory, rows, recoveries=()):
+    """Each row is (link-key letters, saved body letter, alternate letters); a recovery is (row, body letter)."""
+    return release(directory, documents=[r[0] for r in rows], schemas=LINK_SCHEMAS,
+                   detail=[{'saved_body': body(r[1]), 'alternates': [{'body': body(a)} for a in (r[2] if len(r) > 2 else '')]} for r in rows],
+                   recoveries=[{'list_row': row, 'body': body(letter), 'recovered_url': f'https://example.test/{letter}', 'kind': 'recovered_document'}
+                               for row, letter in recoveries])
+
+
+def changed(tmp_path, prev, live):
+    _, result = run(tmp_path, prev, live)
+    assert result['link_rule']['changed'] == len(result['link_rule']['changed_keys']) == len(result['link_rule']['changed_answers'])
+    assert result['link_rule']['ok'] == (not result['link_rule']['changed']) and result['link_rule']['missing'] == 0
+    return [bytes.fromhex(k).decode()[0] for k in result['link_rule']['changed_keys']]
+
+
+def test_fused_documents_whose_keys_answer_the_surviving_file_are_named(tmp_path):
+    """a70ebc3d1466: seven PDFs joined through one listing page H; six can no longer be opened."""
+    prev = served(tmp_path / 'prev', [(letter, letter) for letter in 'ABCDEFG'])
+    live = served(tmp_path / 'live', [('ABCDEFGH', 'G', 'H')])
+    assert changed(tmp_path, prev, live) == list('ABCDEF')
+    answer = json.loads((tmp_path / 'out.json').read_text())['link_rule']['changed_answers'][0]
+    assert answer == {'key': key('A').hex(), 'live_row': 0, 'live_file': 'A', 'live_body': body('A').hex(),
+                      'candidate_row': 0, 'candidate_file': 'ABCDEFGH', 'candidate_body': body('G').hex()}
+
+
+@pytest.mark.parametrize('prev,live', [
+    # The same saved file, on a row that moved.
+    (dict(rows=[('A', 'A'), ('B', 'B')]), dict(rows=[('B', 'B'), ('A', 'A')])),
+    # Another format became the saved file; the live file is its recorded alternate.
+    (dict(rows=[('A', 'A')]), dict(rows=[('AP', 'P', 'A')])),
+    # cae8e4ea34ec603a: a link key U names no body. Its live file stays on the row as a recovery
+    # while a newly fetched body becomes the saved one.
+    (dict(rows=[('U', 'X')], recoveries=[(0, 'X'), (0, 'Y')]), dict(rows=[('UY', 'Y')], recoveries=[(0, 'X'), (0, 'Y')])),
+    # A wrong join split: B now reaches the file it names instead of A's.
+    (dict(rows=[('AB', 'A', 'B')]), dict(rows=[('A', 'A'), ('B', 'B')])),
+    # After a split the key's own file is an alternate of its new row.
+    (dict(rows=[('ABC', 'A', 'BC')]), dict(rows=[('A', 'A'), ('BC', 'B', 'C')])),
+])
+def test_a_live_key_that_still_reaches_its_file_passes(tmp_path, prev, live):
+    assert changed(tmp_path, served(tmp_path / 'prev', **prev), served(tmp_path / 'live', **live)) == []
+
+
+@pytest.mark.parametrize('prev,live,named', [
+    # A link key re-pointed at a document that does not hold the live file.
+    (dict(rows=[('U', 'X'), ('Y', 'Y')]), dict(rows=[('X', 'X'), ('UY', 'Y')]), ['U']),
+    # The live file is recorded, but as another row's recovery.
+    (dict(rows=[('U', 'X'), ('Y', 'Y')]), dict(rows=[('UY', 'Y'), ('Z', 'Z')], recoveries=[(1, 'X')]), ['U']),
+    # The key's own file is served, but by another row than the one the key reaches.
+    (dict(rows=[('A', 'A'), ('B', 'B')]), dict(rows=[('AB', 'B'), ('C', 'C', 'A')]), ['A']),
+    # The saved file was replaced by different bytes and the live file is nowhere on the row.
+    (dict(rows=[('U', 'X')]), dict(rows=[('U', 'Y')]), ['U']),
+])
+def test_a_live_key_that_reaches_another_file_is_named(tmp_path, prev, live, named):
+    assert changed(tmp_path, served(tmp_path / 'prev', **prev), served(tmp_path / 'live', **live)) == named
+
+
+def test_a_release_without_saved_bodies_fails_the_link_rule(tmp_path):
+    """A check that cannot run is not a pass: the rule says what it lacked and is not ok."""
+    bare = dict(SCHEMAS, detail=[('link_key', B)])
+    prev = release(tmp_path / 'prev', documents=['A', 'B'], schemas=bare, detail=[{'link_key': key('A')}, {'link_key': key('B')}])
+    live = release(tmp_path / 'live', documents=['AB'], schemas=bare, detail=[{'link_key': key('A')}])
+    _, result = run(tmp_path, prev, live)
+    rule = result['link_rule']
+    assert rule['changed'] == 0 and rule['missing'] == 0 and not rule['ok']
+    assert rule['unchecked'] == ['a release has no detail.saved_body, so no live key could be checked for answering another file']
+
+
+def test_a_release_without_lookup_keys_fails_the_link_rule(tmp_path):
+    without = {name: fields for name, fields in LINK_SCHEMAS.items() if name != 'urls'}
+    rows = [{'saved_body': body('A'), 'alternates': []}]
+    prev = release(tmp_path / 'prev', documents=['A'], schemas=without, detail=rows)
+    live = release(tmp_path / 'live', documents=['A'], schemas=without, detail=rows)
+    rule = run(tmp_path, prev, live)[1]['link_rule']
+    assert not rule['ok'] and rule['unchecked'] == ['a release has no urls with lookup_key, so none could be checked for answering another file']
+
+
+def test_keys_whose_live_file_became_an_alternate_are_a_group_not_a_refusal(tmp_path):
+    """a70ebc3d1466 fused 13 pages into PDFs this way. Splits, recoveries and unchanged rows are not in it."""
+    prev = served(tmp_path / 'prev', [('H', 'H'), ('P', 'P'), ('AB', 'A', 'B'), ('U', 'X')], recoveries=[(3, 'X'), (3, 'Y')])
+    live = served(tmp_path / 'live', [('HP', 'P', 'H'), ('A', 'A'), ('B', 'B'), ('UY', 'Y')], recoveries=[(3, 'X'), (3, 'Y')])
+    _, result = run(tmp_path, prev, live)
+    rule = result['link_rule']
+    assert rule['ok'] and rule['changed'] == 0 and rule['demoted_keys'] == [key('H').hex()]
+    assert counts(result, 'links') == {('added keys', 'no evidence given'): 1,  # Y, the newly fetched body's key
+                                       ('live file now an alternate', 'the key reaches a row whose saved file is another body'): 1}
+    assert any(g['group'] == 'live file now an alternate' and g['status'] == 'unverified' for g in result['failing'])
+
+
+# ct-wscb: a live lookup key or address must reach a row serving the live file or one of the
+# live document's own files. Each test row is (link-key letters, saved letter, alternates,
+# address letters): address "a" is URL `u/a`, lookup key `key('a')`; "a/m" is member m of `u/a`.
+def addressed(directory, rows, recoveries=()):
+    sources, urls = [], []
+    for index, row in enumerate(rows):
+        for address in (row[3] if len(row) > 3 else '').split():
+            url, _, member = address.partition('/')
+            sources.append({'list_row': index, 'url': f'u/{url}', 'member_path': member or None})
+            urls.append({'lookup_key': key(url), 'list_row': index})
+    return release(directory, documents=[r[0] for r in rows], schemas=LINK_SCHEMAS, sources=sources, urls=urls,
+                   detail=[{'saved_body': body(r[1]), 'alternates': [{'body': body(a)} for a in r[2]]} for r in rows],
+                   recoveries=[{'list_row': row, 'body': body(letter), 'recovered_url': f'https://example.test/{letter}', 'kind': 'recovered_document'}
+                               for row, letter in recoveries])
+
+
+def addresses_changed(tmp_path, prev, live):
+    _, result = run(tmp_path, addressed(tmp_path / 'prev', **prev), addressed(tmp_path / 'live', **live))
+    rule = result['link_rule']
+    assert rule['ok'] == (not rule['missing'] and not rule['changed'] and not rule['lookup_changed'] and not rule['address_changed'])
+    assert rule['lookup_changed'] == len(rule['lookup_changed_keys']) and rule['address_changed'] == len(rule['address_changed_keys'])
+    return [bytes.fromhex(k).decode()[0] for k in rule['lookup_changed_keys']], rule['address_changed_keys']
+
+
+def test_fused_documents_whose_addresses_answer_the_surviving_file_are_named(tmp_path):
+    """a70ebc3d1466: each of six fused PDFs keeps its addresses and lookup keys, on a row that serves another file."""
+    prev = dict(rows=[(letter, letter, '', letter.lower()) for letter in 'ABCDEFG'])
+    live = dict(rows=[('ABCDEFGH', 'G', 'H', 'a b c d e f g')])
+    assert addresses_changed(tmp_path, prev, live) == (list('abcdef'), [f'u/{a}' for a in 'abcdef'])
+    answer = json.loads((tmp_path / 'out.json').read_text())['link_rule']['address_changed_answers'][0]
+    assert answer == {'key': 'u/a', 'live_row': 0, 'live_file': 'A', 'live_body': body('A').hex(),
+                      'candidate_rows': [0], 'candidate_files': ['ABCDEFGH'], 'candidate_bodies': [body('G').hex()]}
+    # The comparison's own shared-key groups see nothing: the merge leaves every key on "the same" document.
+    result = json.loads((tmp_path / 'out.json').read_text())
+    assert not any(g['group'] == 'documents changed for a shared key' for f in result['files'].values() for g in f['groups'])
+
+
+@pytest.mark.parametrize('prev,live', [
+    # The same file, on a row that moved.
+    (dict(rows=[('A', 'A', '', 'a'), ('B', 'B', '', 'b')]), dict(rows=[('B', 'B', '', 'b'), ('A', 'A', '', 'a')])),
+    # The live file became an alternate of its row, or stays as its recovery.
+    (dict(rows=[('A', 'A', '', 'a')]), dict(rows=[('AP', 'P', 'A', 'a')])),
+    (dict(rows=[('U', 'X', '', 'a')], recoveries=[(0, 'X')]), dict(rows=[('UY', 'Y', '', 'a')], recoveries=[(0, 'X')])),
+    # An address holds two editions: a new one beside the live one.
+    (dict(rows=[('A', 'A', '', 'a')]), dict(rows=[('A', 'A', '', 'a'), ('N', 'N', '', 'a')])),
+    # A wrong join split: the address of B, which the live row showed as A, reaches B's own row.
+    (dict(rows=[('AB', 'A', '', 'a b')]), dict(rows=[('A', 'A', '', 'a'), ('B', 'B', '', 'b')])),
+    # An archive member keeps its file.
+    (dict(rows=[('A', 'A', '', 'z/m.htm'), ('B', 'B', '', 'z/n.htm')]), dict(rows=[('B', 'B', '', 'z/n.htm'), ('A', 'A', '', 'z/m.htm')])),
+    # A key or address the candidate no longer publishes is the comparison's group, not this rule's.
+    (dict(rows=[('A', 'A', '', 'a b')]), dict(rows=[('A', 'A', '', 'a')])),
+    # A document the candidate removed: its address now shows only a newer edition. The removed
+    # row and its retired key are reported elsewhere; the address is not a second finding.
+    (dict(rows=[('A', 'A', '', 'a')]), dict(rows=[('N', 'N', '', 'a')])),
+])
+def test_a_live_address_that_still_reaches_its_file_passes(tmp_path, prev, live):
+    assert addresses_changed(tmp_path, prev, live) == ([], [])
+
+
+@pytest.mark.parametrize('prev,live,lookups,addresses', [
+    # An address re-pointed at a document that holds none of the live document's files.
+    (dict(rows=[('A', 'A', '', 'a'), ('B', 'B', '', 'b')]), dict(rows=[('A', 'A', ''), ('B', 'B', '', 'a b')]), ['a'], ['u/a']),
+    # The live file is recorded, but on a row the address does not reach.
+    (dict(rows=[('A', 'A', '', 'a'), ('B', 'B', '', 'b')]), dict(rows=[('A', 'A', ''), ('B', 'B', '', 'a b'), ('C', 'C', 'A')]), ['a'], ['u/a']),
+    # After a split the address lands on a file that was never the live document's.
+    (dict(rows=[('AB', 'A', '', 'a b'), ('C', 'C', '', 'c')]), dict(rows=[('A', 'A', '', 'a'), ('B', 'B', ''), ('C', 'C', '', 'b c')]), ['b'], ['u/b']),
+    # Two archive members swapped between documents: each is named with its member.
+    (dict(rows=[('A', 'A', '', 'z/m.htm'), ('B', 'B', '', 'z/n.htm')]), dict(rows=[('A', 'A', '', 'z/n.htm'), ('B', 'B', '', 'z/m.htm')]),
+     [], ['u/z member m.htm', 'u/z member n.htm']),
+])
+def test_a_live_address_that_reaches_another_file_is_named(tmp_path, prev, live, lookups, addresses):
+    assert addresses_changed(tmp_path, prev, live) == (lookups, addresses)
+
+
+def test_non_package_transcript_changes_are_detected_while_list_row_shifts_are_ignored(tmp_path):
+    tx_struct = pa.struct([('source', S), ('package_id', S), ('list_row', I), ('formats', pa.list_(S)),
+                           ('video_key', S), ('language', S), ('production', S)])
+    schemas = {**SCHEMAS, 'meetings': [('event_id', pa.int64()), ('subject_keys', pa.list_(S)), ('transcripts', pa.list_(tx_struct))]}
+    ct = lambda row: {'source': 'committee_transcript', 'package_id': None, 'list_row': row, 'formats': ['pdf'],
+                      'video_key': None, 'language': None, 'production': None}
+    cap = lambda vk: {'source': 'captions', 'package_id': None, 'list_row': None, 'formats': ['vtt'],
+                      'video_key': vk, 'language': 'en', 'production': 'auto'}
+    prev = release(tmp_path / 'prev', schemas=schemas, documents=['A'],
+                   meetings=[{'event_id': 1, 'subject_keys': [], 'transcripts': [ct(0)]},
+                             {'event_id': 2, 'subject_keys': [], 'transcripts': [cap('youtube:v1')]}])
+    live = release(tmp_path / 'live', schemas=schemas, documents=['A'],
+                   meetings=[{'event_id': 1, 'subject_keys': [], 'transcripts': [ct(9)]},
+                             {'event_id': 2, 'subject_keys': [], 'transcripts': [ct(4)]}])
+    code, result = run(tmp_path, prev, live)
+    assert code == 1
+    assert counts(result, 'meetings') == {('changed transcripts', 'value differs on matched key'): 1}
+
+
+def test_link_rule_refuses_a_key_that_is_both_published_and_retired(tmp_path):
+    """ct-xyo9 (4), plant R3: a candidate whose links and retired_links both carry a key fails the link rule."""
+    schemas = {**SCHEMAS, 'retired_links': [('link_key', B), ('successor_key', B), ('last_release_id', S), ('last_filename', S)]}
+    prev = release(tmp_path / 'prev', schemas=schemas, documents=['A'])
+    live = release(tmp_path / 'live', schemas=schemas, documents=['A', 'N'],
+                   retired_links=[{'link_key': key('N'), 'successor_key': None,
+                                   'last_release_id': '0' * 64, 'last_filename': 'N'}])
+    code, result = run(tmp_path, prev, live)
+    assert code == 1 and not result['ok']
+    rule = result['link_rule']
+    assert not rule['ok']
+    assert rule['published_and_retired'] == 1
+    assert rule['published_and_retired_keys'] == [key('N').hex()]
+
+
+def test_split_document_address_sent_to_sibling_half_counts_in_shared_key_group(tmp_path):
+    """ct-xyo9 (2), plant W1s characterization: sources and urls carry no body hash, so changed_addresses
+    passes whichever half of a split live row an address reaches, while moved() counts every address of
+    the split row in `documents changed for a shared key` and `split rows` stays unverified."""
+    prev = dict(rows=[('AB', 'A', '', 'a b')])
+    right_half = dict(rows=[('A', 'A', '', 'a'), ('B', 'B', '', 'b')])
+    wrong_half = dict(rows=[('A', 'A', '', 'b'), ('B', 'B', '', 'a')])
+    for idx, cand in enumerate((right_half, wrong_half)):
+        sub = tmp_path / f'case-{idx}'
+        sub.mkdir()
+        code, result = run(sub, addressed(sub / 'prev', **prev), addressed(sub / 'live', **cand))
+        assert code == 1
+        assert result['link_rule']['lookup_changed'] == 0 and result['link_rule']['address_changed'] == 0
+        assert counts(result, 'sources') == {('documents changed for a shared key', 'the key now answers other documents'): 2}
+        assert counts(result, 'urls') == {('documents changed for a shared key', 'the key now answers other documents'): 2}
+        assert counts(result, 'list') == {('split rows', 'previous row had no member source'): 1}
+
+
+@pytest.mark.parametrize('drop_side,table,kept_schema,expected_unchecked', [
+    ('candidate', 'urls', [('list_row', I)], 'a release has no urls with lookup_key'),
+    ('candidate', 'sources', [('list_row', I)], 'a release has no sources with url, member_path'),
+    ('base', 'sources', [('list_row', I), ('url', S)], 'a release has no sources with url, member_path'),
+])
+def test_compare_with_missing_address_columns_reports_unchecked_without_crashing(
+        tmp_path, drop_side, table, kept_schema, expected_unchecked):
+    """ct-dagf (4): missing lookup_key, url or member_path must fail closed in link_rule, not crash in account()."""
+    base_schemas = {**LINK_SCHEMAS, **(dict({table: kept_schema}) if drop_side == 'base' else {})}
+    cand_schemas = {**LINK_SCHEMAS, **(dict({table: kept_schema}) if drop_side == 'candidate' else {})}
+    row_for = lambda sch, r, u: [{name: (r if name == 'list_row' else f'u/{u}' if name == 'url' else None if name == 'member_path' else key(u))
+                                  for name, _ in sch}]
+    prev = release(tmp_path / 'prev', documents=['A'], schemas=base_schemas,
+                   detail=[{'saved_body': body('A'), 'alternates': []}],
+                   sources=row_for(base_schemas['sources'], 0, 'a'),
+                   urls=row_for(base_schemas['urls'], 0, 'a'))
+    live = release(tmp_path / 'live', documents=['A'], schemas=cand_schemas,
+                   detail=[{'saved_body': body('A'), 'alternates': []}],
+                   sources=row_for(cand_schemas['sources'], 0, 'b'),
+                   urls=row_for(cand_schemas['urls'], 0, 'b'))
+    code, result = run(tmp_path, prev, live)
+    assert code == 1 and not result['ok'] and not result['link_rule']['ok']
+    assert any(expected_unchecked in msg for msg in result['link_rule']['unchecked'])
+    assert any('column missing' in g['group'] and g['status'] == 'unexplained'
+               for g in result['files'][f'{table}.parquet']['groups'])
+
+
+def test_recording_linked_from_newly_eligible_page_is_verified_via_kept_evidence(tmp_path):
+    """ct-zdj8: YouTube anchor/embed links kept in recording_video_links.parquet trace new recordings to their page."""
+    prev = release(tmp_path / 'prev', documents=['A'])
+    rows = [{'video_key': 'youtube:embed1', 'event_ids': []}, {'video_key': 'youtube:untraced', 'event_ids': []}]
+    live = release(tmp_path / 'live', documents=['A', 'N'], recordings=rows)
+    ev_base = tmp_path / 'ev-base'
+    ev_cand = tmp_path / 'ev-cand'
+    ev_base.mkdir()
+    ev_cand.mkdir()
+    before = evidence(ev_base / 'capture_evidence.parquet', [('A', True, None), ('N', False, None, 'https://agriculture.house.gov/event/1')])
+    after = evidence(ev_cand / 'capture_evidence.parquet', [('A', True, None), ('N', True, None, 'https://agriculture.house.gov/event/1')])
+    page_sha = (key('N') + b'\0' * 24).hex()
+    pq.write_table(
+        pa.Table.from_pylist([{'page_body': page_sha, 'extracted_key': 'youtube:embed1'}],
+                             schema=pa.schema([('page_body', S), ('extracted_key', S)])),
+        ev_cand / 'recording_video_links.parquet',
+    )
+    code, result = run(tmp_path, prev, live, '--evidence-base', before, '--evidence-candidate', after)
+    assert code == 1
+    assert counts(result, 'recordings') == {
+        ('added keys', 'empty event_ids; capture newly real'): 1,
+        ('added keys', 'empty event_ids; source not traced'): 1,
+    }
+
+

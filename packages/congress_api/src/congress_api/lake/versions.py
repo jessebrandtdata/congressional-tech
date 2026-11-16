@@ -3,6 +3,7 @@ import ast
 from collections import defaultdict
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
 import re
 import sys
@@ -18,31 +19,37 @@ import tomllib
 # old-rule entries are gone because no new-rule fingerprint can match them.
 # Any later source, schema, parameter or imported-package change produces an
 # unmapped fingerprint. Add an entry only with a reviewed equivalence decision.
+# ct-zs48/ct-3aap changed MODS extraction, so appearance_records.mods publishes
+# its new fingerprint and its entry was removed. ct-tx7u (2026-11-12, owner
+# Option 2) aligned declared Iceberg field IDs in model/lake/*.schema.json with
+# the IDs create_table assigns (zero change to Arrow schemas, created Iceberg
+# schemas, or parsed rows). Wave 3 (ct-17op, ct-eppo, ct-6mvl, ct-vj08, ct-uz8q,
+# ct-29n4, ct-eofd, cat2-ddas) intentionally bumps all four appearance_records
+# sources, committee_records.house_xml, and filename_readings, so their prior
+# entries are removed; meeting_records, playlist_records, and video_records keep
+# their published IDs under reviewed equivalence.
 _REVIEWED_PRODUCER_VERSIONS = {
-    # appearance_records.congress_gov
-    "7f9ac402f23815c37f5c53dec202ea9094abf172dd8bd32a9efa6b811a779252":
-        "6d9460f5ec203c24c508846092505a875710f565e1ff026479b542c7555e7d48",
-    # appearance_records.house_xml
-    "2daadbeb9c249c4dc19b58969ef6f9305392b1aafcffdcf6d5b826f763d5a69e":
-        "5078ef426e0e262ffcd972b244c3b472669583f164121cc6189ccf69e6abf3a5",
-    # appearance_records.mods
-    "8a34087e918243fabb0b849d3921a0cf78b119578f1ba7d5359d52b18b7f162d":
-        "8a0023a9303e2b0e502b20a6cfaa276a3c0937fa93454f474f7b25f0a1b5c4af",
-    # appearance_records.senate_page
-    "d2faf6985353f72219cd6a8a99feebb142170e4936c1d1eefad9d91de654e67a":
-        "9d48c0f61a9f8ab1407c07f9c49cba7d6e9253a6369d73a8d14389d9bfee6bbb",
-    # committee_records.house_xml
-    "6c2519acf32de655f13ca491eaa3808dd68a9328ed49d76663989a3d18044b28":
-        "e1c6ad0d1398f1d1985e085a0fb9b94c6c42ad38a2d9175ad3e8908eb46c531e",
-    # filename_readings
-    "59d2a03312cff0ac590bf8b3da6aee712f39b6cbc37af96b2ce8d4e79b3a5312":
-        "c65e505ef8eb085e38072297aad395ca532fdc76a348a72b86f88c7734a83b09",
+    # 2026-11-13: request RSS observation changes parser_worker bytes only.
+    # Filename source, SQL, schema, dependencies and rejection precedence stay
+    # unchanged; completed buffered output still precedes timeout/memory checks.
+    # Bounded native filename/worker checks and the decision are in development.md.
+    "43a8bbff5938d1d880f5d599e0d53ce06978e57c963917c1eac83b044ed70295":
+        "e6e2699343ebae7fd149702114d58360a3bd62a7331d19db58215edc042aba70",
     # meeting_records.congress_gov
-    "5a7309c794d57c040addbb5db3d3cf18acd02faf56dfb703129383709c3d8f8c":
+    "d3ffb805e7de5cf81e785b401dbd35d43579287644c4edb2c15cd9ebbcede3e6":
         "325702c1794f246323ed30d7430650355121dd4891a7cea62b44a34a8ae5084d",
     # meeting_records.house_xml
-    "75cb286456a185f89c0081658d4569ced72a148324155df91d2f0945681f3c71":
+    "d877097eeb25a48c80655c0c9f698faf525394d164e97362496bfa9d35aafe63":
         "24c88e855dab86f0c362387ffd4c40cf196e2a6f5c14d8aa1dba66f821ca0df5",
+    # playlist_records.hls
+    "8a66fe42927b6e1d5586a2532ab8d58164890369226e30aa7214456343d05135":
+        "53e6d0904cbc43c20c215505d012fdd054a5eb262d842478dfbdd6891ee4a557",
+    # video_records.youtube_api
+    "302c666b970affdddc583eebe27be241bee31f67bf9d91d2f96e6bbac8bc6cf2":
+        "8a15a14d1921489d4adb5b6f41e594c1d17b67466f716e9cb5994441a0738a4b",
+    # video_records.youtube_cache
+    "11bea80fd2ff94c93111b7e43d057abc42f644a9cc8b71a87b1b836eb2f9ccd9":
+        "6efbae6d2d009baf72e0de5e60eba12307cd427f4900a2c892d36d6cc08ef3ba",
 }
 
 # Content-addressed body custody, table I/O, worker transport and this module.
@@ -86,6 +93,11 @@ def version_digest(*, packages, files, values=None):
     return digest.hexdigest()
 
 
+def reviewed_producer_version(fingerprint):
+    """Map a reviewed-equivalent producer fingerprint to its published ID, or return it unchanged."""
+    return _REVIEWED_PRODUCER_VERSIONS.get(fingerprint, fingerprint)
+
+
 def producer_version(*, root, module, files, packages=None, values=None):
     """A record producer's identity: its declared inputs plus the locked packages it imports.
 
@@ -100,7 +112,7 @@ def producer_version(*, root, module, files, packages=None, values=None):
     locked = ImportClosure(root).locked_versions(seeds, stop=_PLUMBING)
     fingerprint = version_digest(packages=packages, files=files,
                                  values={**(values or {}), 'locked_imports': locked})
-    return _REVIEWED_PRODUCER_VERSIONS.get(fingerprint, fingerprint)
+    return reviewed_producer_version(fingerprint)
 
 
 def _normalized(name):
@@ -141,6 +153,7 @@ class ImportClosure:
         self.requested_extras = defaultdict(set)
         self.distributions = distributions or {}
         self._paths = {}
+        self._listings = {}
         for entry in tomllib.loads((self.root / 'uv.lock').read_text())['package']:
             self.entries[_normalized(entry['name'])].append(entry)
             source = entry['source']
@@ -156,8 +169,26 @@ class ImportClosure:
         if parts not in self._paths:
             self._paths[parts] = next((path for source in self.sources for module in [source.joinpath(*parts)]
                                        for path in (module / '__init__.py', module.with_suffix('.py'))
-                                       if path.is_file()), None)
+                                       if self._exact_file(source, path)), None)
         return self._paths[parts]
+
+    def _exact_file(self, source, path):
+        """Whether `path` is a file whose every name below `source` is listed exactly, as Python imports it.
+
+        A case-insensitive disk (macOS) also accepts house_naming/Engine.py for `from house_naming
+        import Engine` and would hash engine.py again under a name Linux does not have (ct-p394).
+        Each directory is listed once per closure."""
+        directory = source
+        for name in path.relative_to(source).parts:
+            if directory not in self._listings:
+                try:
+                    self._listings[directory] = frozenset(os.listdir(directory))
+                except OSError:
+                    self._listings[directory] = frozenset()
+            if name not in self._listings[directory]:
+                return False
+            directory = directory / name
+        return path.is_file()
 
     def _imports(self, path):
         # Include imports inside functions, plus package initializers and possible

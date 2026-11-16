@@ -4,12 +4,14 @@
 -- keeps that supplier's name and URL. Dates eligible for selection rank before opaque aliases. Shown status/error stay separate from the per-field suppliers.
 WITH own AS (
  SELECT s.source_id,
-  f.* EXCLUDE(document_kind,document_family,committee_code,filename_date),
+  f.* EXCLUDE(document_kind,document_family,committee_code,measure_keys,bioguide_ids,filename_date),
   {{FILENAME_DATE}} AS filename_date,{{FILENAME_DATE_ELIGIBLE}} AS date_eligible,
-  -- Normalize Iceberg element field ids before these values meet the aggregated linked choices.
+  -- Normalize Iceberg element field ids before these values meet aggregated choices or published list exports.
   arrow_cast(f.document_kind,'List(Utf8)') AS document_kind,
   arrow_cast(f.document_family,'List(Utf8)') AS document_family,
-  arrow_cast(f.committee_code,'List(Utf8)') AS committee_code
+  arrow_cast(f.committee_code,'List(Utf8)') AS committee_code,
+  arrow_cast(f.measure_keys,'List(Utf8)') AS measure_keys,
+  arrow_cast(f.bioguide_ids,'List(Utf8)') AS bioguide_ids
  FROM source_files s JOIN filename_readings f
   ON s.filename=f.filename AND coalesce(s.source_url,'')=f.source_url
  WHERE f.catalog_version={{CATALOG_VERSION}}
@@ -78,8 +80,9 @@ SELECT o.source_id,o.filename,o.source_url,o.catalog_version,o.status,o.error_ty
  CASE WHEN o.status='completed' AND coalesce(array_length(o.committee_code),0)>0 THEN o.status WHEN l.committee_code IS NOT NULL THEN 'completed' ELSE o.status END AS committee_code_status,
  -- Whether the name supplying the value follows a published naming convention (the reading's valid).
  CASE WHEN {{SHOWN_DATE_SELECTED}} THEN o.valid ELSE l.date_valid END AS filename_date_valid,
- CASE WHEN {{SHOWN_DATE_SELECTED}} THEN coalesce(o.date_eligible,false)
-  ELSE coalesce(l.date_eligible,false) END AS filename_date_eligible,
+ -- IS TRUE around the whole CASE, not coalesce(..., false) in each branch: same values, and the column
+ -- stays required when an engine types it from the optimized plan (test_required_flags.py).
+ (CASE WHEN {{SHOWN_DATE_SELECTED}} THEN o.date_eligible ELSE l.date_eligible END) IS TRUE AS filename_date_eligible,
  CASE WHEN o.status='completed' AND o.congress IS NOT NULL THEN o.valid ELSE l.congress_valid END AS congress_valid,
  CASE WHEN {{SHOWN_DATE_SELECTED}} THEN o.filename ELSE l.date_name END AS filename_date_name,
  CASE WHEN {{SHOWN_DATE_SELECTED}} THEN o.source_url ELSE l.date_url END AS filename_date_url,

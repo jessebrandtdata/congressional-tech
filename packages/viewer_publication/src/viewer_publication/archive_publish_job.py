@@ -133,7 +133,7 @@ def produce_daily_inputs(template,daily,*,engine,raw_store,producer_records=None
     if selected.get('body_inventory') is not None and not Path(selected['body_inventory']).exists():
         raise ValueError('The pinned daily body inventory is absent: '+str(selected['body_inventory']))
     production=produce_daily(selected,engine=engine,raw_store=raw_store,producer_records=producer_records)
-    summary={key:production.get(key) for key in ['status','pins','receipt_keys','new_receipt_keys','currentversions','producers']}
+    summary={key:production.get(key) for key in ['status','pins','receipt_keys','new_receipt_keys','currentversions','producers','carried']}
     summary_path=work/'daily-summary.json'
     if retain:
         from viewer_publication.archive_controller import _save_continuation
@@ -159,7 +159,7 @@ def produce_daily_inputs(template,daily,*,engine,raw_store,producer_records=None
         verified_files=snapshot.verified(),**handoff)
 
 
-def _resume_daily_inputs(template,daily,*,publish_work):
+def resume_daily_inputs(template,daily,*,publish_work):
     """Rebind the completed daily inputs before consulting the current selection."""
     from viewer_publication.archive_controller import _read_continuation
     _,checkpoint=_read_continuation(publish_work,daily=True)
@@ -341,11 +341,10 @@ def publication_configuration(path,*,bucket):
     The model keeps its lake scope. A derived upload runtime changes only the
     owned object prefix, using the same explicit R2 account/bucket and native pins.
     """
+    from docspec_client.client import runtime_paths
     path=Path(path).resolve();settings,runtime_identity=_public_configuration(path)
     if not settings.get('remote'):raise ValueError('Publication requires an explicitly configured remote native engine')
-    settings=dict(settings)
-    for name in ['binary','workspace','remote','limits','credentials']:
-        if name in settings:settings[name]=_local(settings[name],path.parent)
+    settings=runtime_paths(settings,path.parent)
     remote,remote_identity=_public_configuration(settings['remote'])
     properties=remote.get('properties');references=remote.get('secret_env')
     allowed={'uri','warehouse','s3.endpoint','s3.region','s3.path-style-access',
@@ -473,17 +472,18 @@ def execute(spec,*,runtime_factory=None,storage_factory=None,process_runner=None
         if not spec.get('resume') and any(p.exists() or p.is_symlink() for p in [path,path.with_name(path.name+'-provenance')]):
             raise ValueError('Daily production work and provenance cache must be fresh')
     if not Path(spec['site_dist']).is_dir():raise ValueError('Publication site_dist must already exist; build the site first')
-    from docspec_client.client import NativeDatasets
+    from docspec_client.client import NativeDatasets,choose_runtime,runtime_record
     from congress_shared.storage import connect_r2
     from viewer_publication.archive_controller import run_publish,_publication_directory
     runtime_factory=runtime_factory or NativeDatasets.from_config
     storage_factory=storage_factory or connect_r2
     process_runner=process_runner or subprocess.run
-    engine_config=spec['_model']['engine_config']
-    if not Path(engine_config).exists() and os.environ.get('DOCSPEC_RUNTIME_CONFIG'):
-        engine_config=os.environ['DOCSPEC_RUNTIME_CONFIG']
+    engine_config,choice=choose_runtime(spec['_model'].get('engine_config'))
+    if not engine_config:raise ValueError('Publication requires model engine_config or DOCSPEC_RUNTIME_CONFIG')
     settings,remote,endpoint,configuration_pins=publication_configuration(engine_config,bucket=spec['bucket'])
     require_end_to_end(end_to_end_runner)
+    # Printed before any engine work, and sealed with the model's continuation in the candidate folder.
+    ran=runtime_record(engine_config,choice,log=sys.stderr)
     def require_configuration():
         for path,identity in configuration_pins:identity.require(path)
         require_comparison(acceptance)
@@ -501,7 +501,7 @@ def execute(spec,*,runtime_factory=None,storage_factory=None,process_runner=None
             spec['_model_identity'].require(spec['model_spec']['path'])
             target_identity.require(spec['targets']['path'])
             client=storage_factory(bucket=spec['bucket'],endpoint_url=endpoint,retries={'total_max_attempts':1})
-            selected_model=spec['_model'];keys=spec['receipt_keys'];provenance=spec['provenance'];verified=None;daily=None
+            selected_model=spec['_model'];keys=spec['receipt_keys'];provenance=spec['provenance'];verified=None;daily=None;reads=None
             from congress_api.lake.producer_records import ProducerRecords
             anchors={}
             for name,pin in spec.get('producers',{}).items():
@@ -516,7 +516,7 @@ def execute(spec,*,runtime_factory=None,storage_factory=None,process_runner=None
                 reads=configure_read_retries(storage_factory(bucket=spec['bucket'],endpoint_url=endpoint,retries={'total_max_attempts':1}))
                 raw_store=BodyStore(R2Adapter(reads,spec['bucket']))
                 if spec.get('resume'):
-                    daily=_resume_daily_inputs(selected_model,spec['_daily'],publish_work=Path(spec['work']))
+                    daily=resume_daily_inputs(selected_model,spec['_daily'],publish_work=Path(spec['work']))
                 else:
                     retention={'retain':True} if spec.get('_nightly') else {}
                     daily=produce_daily_inputs(selected_model,spec['_daily'],engine=model,
@@ -548,6 +548,13 @@ def execute(spec,*,runtime_factory=None,storage_factory=None,process_runner=None
             options=dict(client=client,engine=engine,bucket=spec['bucket'],work=spec['work'],run=dict(spec['run'],site_targets=site_targets),
                 public_origin=spec['public_origin'],contract=lambda **context:probe('contract',context),
                 canary=lambda **context:probe('canary',context))
+            if spec.get('automatic_causes'):
+                # The automatic proof reads one raw receipt per new receipt key; a transient error on
+                # one of thousands of GETs must retry, never end the night (ct-gc99).
+                if reads is None:
+                    from congress_api.retention.r2 import configure_read_retries
+                    reads=configure_read_retries(storage_factory(bucket=spec['bucket'],endpoint_url=endpoint,retries={'total_max_attempts':1}))
+                options['receipt_client']=reads
             if spec.get('_nightly'):
                 options['daily_summary_sha256']=daily['daily_summary_sha256']
                 if spec.get('resume'):
@@ -557,7 +564,7 @@ def execute(spec,*,runtime_factory=None,storage_factory=None,process_runner=None
             if 'release_causes' in spec:
                 from viewer_publication.release_gate import load_causes
                 causes=load_causes(spec['release_causes'])
-            result=run_publish(selected_model,receipt_keys=keys,provenance=provenance,verified_files=verified,
+            result=run_publish(selected_model,receipt_keys=keys,provenance=provenance,verified_files=verified,engine_runtime=ran,
                 measured_release_id=measured_release_id,comparison_acceptance=acceptance,resume=spec.get('resume',False),
                 release_causes=causes,link_history=spec.get('link_history',[]),
                 first_release=spec.get('first_release',False),automatic_causes=spec.get('automatic_causes',False),**options)
