@@ -17,6 +17,7 @@ import {ArchiveRows, PublicLink, day, siteBase} from './ArchiveRows.tsx';
 import {HearingDetail} from './HearingDetail.tsx';
 import {CommitteeDetail} from './CommitteeDetail.tsx';
 import {WitnessDetail} from './WitnessDetail.tsx';
+import {PersonDetail} from './PersonDetail.tsx';
 import {MemberDetail} from './MemberDetail.tsx';
 import {SubjectDetail} from './SubjectDetail.tsx';
 
@@ -25,6 +26,7 @@ export {
   HearingDetail,
   CommitteeDetail,
   WitnessDetail,
+  PersonDetail,
   MemberDetail,
   SubjectDetail,
   siteBase,
@@ -238,7 +240,7 @@ export function ArchiveDetail({
         <span className="archive-measure-list">
           {witnessItems.map((w:any)=>{
             const wk=String(w.witness_key??w.name_key??w.name??'');
-            const label=w.name&&w.organization?`${w.name} (${w.organization})`:(witnessLabel(w)||wk);
+            const label=w.name&&w.organization?`${witnessLabel(w)} (${w.organization})`:(witnessLabel(w)||wk);
             return onWitness
               ?<button key={wk} type="button" className="archive-measure-pill" onClick={()=>onWitness(wk)}>{label}</button>
               :<span key={wk} className="archive-measure-pill">{label}</span>;

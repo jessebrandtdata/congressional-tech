@@ -238,6 +238,8 @@ def test_execute_fails_closed_before_deleting_releases_when_raw_verification_inp
         def verify_runtime(self):
             return {'verified': True}
 
+    from archive_job_fixture import constructed_runtime
+
     spec_payload = {
         'version': 1,
         'bucket': 'archive-fixture',
@@ -246,7 +248,7 @@ def test_execute_fails_closed_before_deleting_releases_when_raw_verification_inp
         'external_pins': [],
         'tables': {name: {'namespace': ['archive'], 'name': name} for name in ALL_TABLE_NAMES},
         'thresholds': {'file_count': 256, 'manifest_count': 64, 'scan_planning_seconds': 30.0},
-        'engine_config': str(tmp_path / 'runtime.json'),
+        'engine_config': str(constructed_runtime(tmp_path / 'stub-engine')),
         'raw_verification': {
             'captures': str(tmp_path / 'missing-captures.parquet'),
             'receipt_inventory': str(tmp_path / 'missing-receipt-inventory.json'),
@@ -363,7 +365,9 @@ def test_prunable_release_ids_and_maintenance_job_spec_sections():
     assert spec['external_pins_source'] == 'https://data.spicygov.ai/pins/archive-releases.json'
     raw = spec['raw_verification']
     assert raw['captures']['kind'] == 'native_table'
-    assert '/archive_r1b/captures/' in raw['captures']['metadata_location']
+    target = spec['tables']['captures']
+    metadata_path = '/' + '/'.join([*target['namespace'], target['name'], 'metadata']) + '/'
+    assert metadata_path in raw['captures']['metadata_location']
     assert raw['apply_staged'] is True
     assert not raw.keys() & {'receipt_inventory', 'verification_inventory'}
     assert 'lake_maintenance' in spec

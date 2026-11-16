@@ -1,0 +1,45 @@
+---
+id: ct-0hay
+status: closed
+deps: []
+links: [ct-m878, ct-jnjv, ct-m704, ct-chc4]
+created: 2026-11-09T23:15:13Z
+type: bug
+priority: 2
+assignee: mikewolfd
+tags: [congress_api, body_text, warc, export]
+---
+# WARC-recovered text never reaches the body_text export: rows are keyed by the envelope body
+
+body_text reads a WARC capture by unwrapping it and keys the text row by the WARC envelope's own SHA (parser `warc`). The export (`viewer_publication/body_text_export.py`) ships only rows whose `body_sha` is a `detail.saved_body`. A WARC envelope has record role `envelope`, which is never a saved file, so none of these rows can match. On the 1/16 slice all 96 WARC text rows are outside the export, while the export pointer still counts them under `warc_unwrapped` (.cache/archive-release/body-text-slice-20261109).
+
+To settle first: for a document recovered from a WARC, which body does `detail.saved_body` name (the envelope, or the unwrapped payload), and does a text row exist under that SHA? Then either key the text by the unwrapped payload's SHA, or have the export join through the envelope-to-payload mapping the model already holds. One read per body either way; do not unwrap twice.
+
+## Acceptance Criteria
+
+- Every WARC-recovered document whose payload has text gets it in the export, or the count that cannot is named with reasons.
+- The pointer's `warc_unwrapped` count equals rows actually exported.
+- Slice re-measure: 96 WARC rows accounted for.
+
+
+## Notes
+
+**2026-11-10T00:01:58Z**
+
+2026-11-10 settled from the 1/16 slice and release-prep detail.parquet (read-only): detail.saved_body never names a WARC envelope (0 of 96 slice envelope SHAs). Recovered documents (saved_kind=recovery, 6,359 docs, 6,102 bodies) are saved under their own body SHA and already get text under it: 376 of the 391 in the slice have a row (pdf_text 285, html_text 70, xml_text 21; 15 have none, not yet explained). So recovery text is NOT missing from the export. The 96 warc rows are a different population: web-page payloads read out of envelopes; only 9 share exact text with a saved original HTML body. Open question narrowed to: which list rows do those 96 envelopes belong to, and is their payload wanted as document text at all. If not, drop 'warc' from FORMAT_PARSERS (saves the reads) and remove warc_unwrapped from the pointer.
+
+**2026-11-10T03:26:46Z**
+
+2026-11-10 (read-only, slice + release-prep model output): the 96 slice WARC envelopes are provider responses (family external/provider-responses, application/warc+gzip) for 94 veterans.house.gov testimony and opening-statement pages plus one edlabor.house.gov and one doyle.house.gov page. 95 of the 96 URLs are published documents and every one has saved_body = a separate text/html body (saved_kind original), never the envelope. 9 of those saved bodies fall in the slice prefix and all 9 have an html_text row whose text is identical to the envelope's warc row. So the envelope row duplicates text the document gets under its own saved body once html runs on every prefix. Not yet shown corpus-wide (1,768 warc bodies by sniff). Plan: read html and warc together in the html phase of the full run, compare every envelope's payload text with the html_text row of the saved body at the same URL; if all match, drop warc from FORMAT_PARSERS and warc_unwrapped from the pointer; if some envelopes have no saved body with text, name them and key those rows by the payload.
+
+**2026-11-11T14:40:59Z**
+
+validated 2026-11-11, left open: the corpus-wide comparison planned in the 03:26Z note has not been run (the full body-text run is still in progress; OCR chunk-0085 running at 14:29Z), and warc is still read and counted (lake/body_text.py:50 FORMAT_PARSERS, body_text_export.py:186 warc_unwrapped; no commit touches ct-0hay since b3c937a8). Remains: compare every envelope's payload text with the html_text row of the saved body at the same URL, then drop warc from FORMAT_PARSERS and warc_unwrapped from the pointer, or key the leftovers by payload.
+
+**2026-11-12T04:30:00Z**
+
+Closed on `claude/ct-wave-6-bodytext-prep` after complete read-only slice + corpus comparison (`.cache/archive-release/investigations/wave6-bodytext-prep-20261112/ct_0hay_warc_comparison.{json,md}`):
+- **Recovery documents (`saved_kind='recovery'`):** All `6,219` rows (`5,964` distinct `saved_body` SHAs: `4,432` `pdf`, `1,403` `html`, `346` `xml`, `19` `other`, `17` `docx`, `2` `doc`) in `release-20261112-pin/detail.parquet` have non-envelope `saved_body`s; **`0`** WARC envelope SHAs appear in `detail.saved_body`, `detail.alternates`, or `recoveries.body`.
+- **Full-corpus WARC sniff population (`1,768` bodies, `external/provider-responses`):** **`1,736`** map to published documents in `release-20261112-pin/detail.parquet` and **`1,736 / 1,736` (`100%`)** already have a separate non-envelope `detail.saved_body` (`saved_kind='original'`: `1,706` `html`, `30` `xml`, `1` `pdf`; `0` missing `saved_body`). The remaining **`32`** (`31` `edlabor.house.gov/download/...` + `1` `science.house.gov/download/johnson-amendment-to-hr-4372`) are ~7.3 KB CMS `"Download File / Please wait..."` interstitial HTML redirect shells (`url_state`: `capture_disposition='eligible'`, `capture_reason='no_satisfying_recovery'`), intentionally excluded from `detail.saved_body`.
+- **Slice `96` WARC rows accounted for:** `95` map to published documents with `unwrapped_payload_sha256 == detail.saved_body` (`9` in slice prefix `0` all match `html_text` byte-for-byte with `0` diffs; `86` outside prefix `0` pending the HTML phase); `1` (`0e6a917afb58...`, `https://edlabor.house.gov/download/shalalaa2`) is one of the 32 unpublished CMS redirect shells.
+- **Code changes:** Dropped `'warc'` from `FORMAT_PARSERS` in `lake/body_text.py` and `"parsers"` in `model/jobs/body-text-export.json`, and removed `warc_unwrapped` from `pointer['coverage']` in `viewer_publication/body_text_export.py` (retaining `parsers/body_text.py` unwrap and `reading_versions.py` `'warc'` declaration for historical rows).

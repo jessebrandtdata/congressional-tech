@@ -18,15 +18,30 @@ from .release import PUBLICATION, encoded, load_selection, prepare
 from .hearing_models import HearingBundleQuery, TranscriptQuery
 
 
-def create_server(selection=None, *, timeout=10.0, data_dir=None, publication=PUBLICATION):
+def create_server(selection=None, *, timeout=10.0, data_dir=None, publication=PUBLICATION, warm_on_start=False):
     if selection is None and data_dir is None:
         raise ValueError('A selected release or data directory is required')
     worker = Worker(selection, timeout=timeout)
     setup_lock = anyio.Lock()
 
+    async def ensure_selection():
+        if worker.selection is None:
+            async with setup_lock:
+                if worker.selection is None:
+                    # Keep MCP initialization fast. The host may cancel a tool,
+                    # but keep this lock until the preparer's thread finishes.
+                    loader = partial(load_selection, data_dir) if (data_dir / 'selection.json').exists() else partial(prepare, data_dir, publication)
+                    worker.selection = await anyio.to_thread.run_sync(loader)
+
+    async def warm():
+        await ensure_selection()
+        return await worker.warm()
+
     @asynccontextmanager
     async def lifespan(server):
         try:
+            if warm_on_start:
+                await warm()
             yield
         finally:
             await worker.close()
@@ -45,12 +60,10 @@ def create_server(selection=None, *, timeout=10.0, data_dir=None, publication=PU
 
     @mcp.custom_route('/ready', methods=['GET'])
     async def ready(request):
-        """Open the exact selected data and its index before reporting readiness."""
+        """Open and warm the exact selected data and its index before reporting readiness."""
         from starlette.responses import JSONResponse
         try:
-            result = await call('overview', {})
-            if worker.selection['manifest'].get('text_index'):
-                await call('search_text', dict(text='CongressExplorerReadinessProbe', limit=1))
+            result = await warm()
             return JSONResponse(dict(status='ready', version=__version__, release_id=result['release_id']),
                                 headers={'Cache-Control': 'no-store'})
         except Exception:
@@ -59,13 +72,7 @@ def create_server(selection=None, *, timeout=10.0, data_dir=None, publication=PU
 
     async def call(method, query):
         try:
-            if worker.selection is None:
-                async with setup_lock:
-                    if worker.selection is None:
-                        # Keep MCP initialization fast. The host may cancel a tool,
-                        # but keep this lock until the preparer's thread finishes.
-                        loader = partial(load_selection, data_dir) if (data_dir / 'selection.json').exists() else partial(prepare, data_dir, publication)
-                        worker.selection = await anyio.to_thread.run_sync(loader)
+            await ensure_selection()
             return await worker.call(method, query)
         except (ExplorerError, OSError, ValueError, KeyError, TypeError) as error:
             raise ToolError(str(error)) from error
@@ -134,7 +141,9 @@ def create_server(selection=None, *, timeout=10.0, data_dir=None, publication=PU
         """Return a bounded hearing dossier using published meeting, witness and recording associations.
 
         Includes meeting, committees, current witnesses, prepared_testimony, official_transcripts,
-        committee_transcripts, captions, recordings and coverage. Narrow include to those section names;
+        committee_transcripts, captions, recordings and coverage. A sitting Member of Congress acting officially is
+        listed among witnesses as witness_type member_appearance with matched_bioguide_id and match_basis; the
+        witnesses coverage count holds only outside witnesses. Narrow include to those section names;
         each section's next request continues it using offsets. Transcript rows carry get_transcript references.
         Original recording observations and event versus package_context scope remain intact.
         The meeting row's captions {advertised, archived, basis} separates publisher-advertised captions
@@ -218,6 +227,8 @@ def create_server(selection=None, *, timeout=10.0, data_dir=None, publication=PU
         first_captured is when the archive first fetched it, and date_kind its basis
         (captured, import_day, unknown). Neither is a page-update date, and only a meeting-sourced date is the hearing date.
         measure_key and witness_key match direct list.<col>[] document annotations (list.measure_keys holds bill_ids);
+        document_kind also matches the words the release's schema lists as the same kind (list.parquet synonyms,
+        e.g. testimony and witness-statement).
         use the bill_hearing_transcripts, nomination_transcripts, and witness_transcripts recipes for package_id-linked hearing transcripts.
         sort='archive' preserves archive order. sort='recent' or 'oldest' uses accepted dates by default;
         include_suspect and include_undated opt into those rows. Older releases keep literal dates and report unavailable qualification.

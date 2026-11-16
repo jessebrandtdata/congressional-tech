@@ -32,6 +32,14 @@ class LegislativeReader:
         return terms
 
     @staticmethod
+    def _congress_ordinal_sql(expr):
+        n = f'try_cast({expr} AS INTEGER)'
+        return (
+            f"({expr}||CASE WHEN ({n}%100) IN (11,12,13) THEN 'th' "
+            f"WHEN ({n}%10)=1 THEN 'st' WHEN ({n}%10)=2 THEN 'nd' WHEN ({n}%10)=3 THEN 'rd' ELSE 'th' END)"
+        )
+
+    @staticmethod
     def local_action_time(column):
         """Parse only a supplied local clock value; preserve literal precision and unknown zones."""
         return (f"CASE WHEN regexp_full_match({column},'[0-9]{{2}}:[0-9]{{2}}:[0-9]{{2}}([.][0-9]{{1,6}})?') "
@@ -62,6 +70,32 @@ class LegislativeReader:
                              f'JOIN {bills} b ON linked.bill_id=b.bill_id')
             matches.append("(e.source_table='roll_call_votes' AND e.event_key IN ("+' UNION ALL '.join(votes)+'))')
         return matches
+
+    def _member_vote_date_buckets(self):
+        shadowed = bool(self.db.execute(
+            "SELECT 1 FROM duckdb_views() WHERE database_name='temp' AND view_name='member_votes' "
+            "UNION ALL SELECT 1 FROM duckdb_tables() WHERE database_name='temp' AND table_name='member_votes' LIMIT 1"
+        ).fetchall())
+        if not shadowed and getattr(self, '_ballot_date_buckets', None) is not None:
+            return self._ballot_date_buckets
+        # Avoid a WHERE clause here: DuckDB otherwise pushes TRY_CAST below GROUP BY
+        # onto all 10M+ ballot rows instead of evaluating it once per distinct string.
+        grouped = self.db.execute(
+            'SELECT vote_date,try_cast(vote_date AS DATE) IS NOT NULL,count(*) AS n '
+            'FROM member_votes GROUP BY vote_date'
+        ).fetchall()
+        dated = [dict(v=literal, n=int(count)) for literal, parseable, count in grouped if parseable]
+        rows = self.db.execute(
+            'SELECT list(item.v ORDER BY item.v),sum(item.n)::BIGINT '
+            'FROM unnest(?::STRUCT(v VARCHAR,n BIGINT)[]) u(item) '
+            'GROUP BY try_cast(item.v AS DATE) ORDER BY try_cast(item.v AS DATE) ASC',
+            [dated],
+        ).fetchall() if dated else []
+        buckets = [(list(literals), int(count)) for literals, count in rows]
+        value = (buckets, sum(count for _, count in buckets))
+        if not shadowed:
+            self._ballot_date_buckets = value
+        return value
 
     def legislative_page(self, query, table, date_field, identity):
         query.window()
@@ -101,19 +135,47 @@ class LegislativeReader:
         sql = 'SELECT t.* FROM '+source+(' WHERE '+' AND '.join(terms) if terms else '')
         expand = None
         if table == 'member_votes' and not terms and self.entity_keys.get(table) == identity:
-            # Cast each distinct literal once, retaining TRY_CAST's exact meaning.
-            # Select narrow page keys before fetching the published primary-key rows.
-            sql = '''WITH ballot_dates AS MATERIALIZED (
-                SELECT vote_date,try_cast(vote_date AS DATE) AS parsed_date
-                FROM (SELECT DISTINCT vote_date FROM member_votes))
-                SELECT t.vote_id,t.member_key,d.parsed_date FROM member_votes t
-                JOIN ballot_dates d ON t.vote_date IS NOT DISTINCT FROM d.vote_date'''
-            order = 'd.parsed_date ASC NULLS LAST,t.vote_id,t.member_key'
+            buckets, dated_total = self._member_vote_date_buckets()
+            if not buckets:
+                # Every literal ballot date casts to NULL; primary-key Top-N order
+                # preserves TRY_CAST(... ASC NULLS LAST) and prunes Parquet row groups.
+                sql = 'SELECT t.vote_id,t.member_key FROM member_votes t'
+                order = 't.vote_id,t.member_key'
 
-            def expand(selected):
-                return 'WITH ballot_page AS MATERIALIZED ('+selected+''')
-                    SELECT t.* FROM ballot_page p JOIN member_votes t USING(vote_id,member_key)
-                    ORDER BY p.parsed_date ASC NULLS LAST,t.vote_id,t.member_key'''
+                def expand(selected):
+                    return ('WITH ballot_page AS MATERIALIZED ('+selected+') '
+                            'SELECT t.* FROM ballot_page p JOIN member_votes t USING(vote_id,member_key) '
+                            'ORDER BY t.vote_id,t.member_key')
+            else:
+                prefix_literals, covered = [], 0
+                if not query.cursor and dated_total >= query.limit + 1:
+                    for literals, count in buckets:
+                        prefix_literals.extend(literals)
+                        covered += count
+                        if covered >= query.limit + 1:
+                            break
+                if prefix_literals and covered >= query.limit + 1 and len(prefix_literals) <= 500:
+                    placeholders = ','.join('?' for _ in prefix_literals)
+                    sql = f'''WITH ballot_dates AS MATERIALIZED (
+                        SELECT vote_date,try_cast(vote_date AS DATE) AS parsed_date
+                        FROM unnest([{placeholders}]::VARCHAR[]) u(vote_date))
+                        SELECT t.vote_id,t.member_key,d.parsed_date FROM member_votes t
+                        JOIN ballot_dates d ON t.vote_date=d.vote_date'''
+                    args = list(prefix_literals)
+                else:
+                    # Cast each distinct literal once, retaining TRY_CAST's exact meaning.
+                    # Select narrow page keys before fetching the published primary-key rows.
+                    sql = '''WITH ballot_dates AS MATERIALIZED (
+                        SELECT vote_date,try_cast(vote_date AS DATE) AS parsed_date
+                        FROM (SELECT DISTINCT vote_date FROM member_votes))
+                        SELECT t.vote_id,t.member_key,d.parsed_date FROM member_votes t
+                        JOIN ballot_dates d ON t.vote_date IS NOT DISTINCT FROM d.vote_date'''
+                order = 'd.parsed_date ASC NULLS LAST,t.vote_id,t.member_key'
+
+                def expand(selected):
+                    return 'WITH ballot_page AS MATERIALIZED ('+selected+''')
+                        SELECT t.* FROM ballot_page p JOIN member_votes t USING(vote_id,member_key)
+                        ORDER BY p.parsed_date ASC NULLS LAST,t.vote_id,t.member_key'''
 
         result = self.page(query, sql, args,order=order,expand=expand)
         if table == 'bill_actions':
@@ -179,7 +241,8 @@ class LegislativeReader:
                 raise ExplorerError('legislation_by_subject requires a published subject label')
             if query.chamber:
                 terms.append("CASE split_part(t.bill_id,'-',2) WHEN 'hr' THEN 'house' WHEN 'hres' THEN 'house' WHEN 'hjres' THEN 'house' WHEN 'hconres' THEN 'house' WHEN 's' THEN 'senate' WHEN 'sres' THEN 'senate' WHEN 'sjres' THEN 'senate' WHEN 'sconres' THEN 'senate' END=?"); args.append(query.chamber)
-            source_url = "'https://www.congress.gov/bill/'||split_part(t.bill_id,'-',1)||'th-congress/'||CASE split_part(t.bill_id,'-',2) WHEN 'hr' THEN 'house-bill' WHEN 's' THEN 'senate-bill' WHEN 'hres' THEN 'house-resolution' WHEN 'sres' THEN 'senate-resolution' WHEN 'hjres' THEN 'house-joint-resolution' WHEN 'sjres' THEN 'senate-joint-resolution' WHEN 'hconres' THEN 'house-concurrent-resolution' WHEN 'sconres' THEN 'senate-concurrent-resolution' END||'/'||split_part(t.bill_id,'-',3)"
+            bill_cong = self._congress_ordinal_sql("split_part(t.bill_id,'-',1)")
+            source_url = f"'https://www.congress.gov/bill/'||{bill_cong}||'-congress/'||CASE split_part(t.bill_id,'-',2) WHEN 'hr' THEN 'house-bill' WHEN 's' THEN 'senate-bill' WHEN 'hres' THEN 'house-resolution' WHEN 'sres' THEN 'senate-resolution' WHEN 'hjres' THEN 'house-joint-resolution' WHEN 'sjres' THEN 'senate-joint-resolution' WHEN 'hconres' THEN 'house-concurrent-resolution' WHEN 'sconres' THEN 'senate-concurrent-resolution' END||'/'||split_part(t.bill_id,'-',3)"
         elif query.name == 'pending_nominations':
             key, field = 'nomination_id', 'received'
             terms += self.dated_filters(query, 't.received', args)
@@ -188,7 +251,9 @@ class LegislativeReader:
             terms.append("t.latest_action_text IS NOT NULL AND NOT regexp_matches(lower(t.latest_action_text),'^confirmed|withdrawal of nomination|withdrawn|^returned to the president|^rejected by the senate')")
             if query.chamber and query.chamber != 'senate': terms.append('false')
             if subject: raise ExplorerError('Nominations have no published bill-subject association')
-            source_url = "'https://www.congress.gov/nomination/'||split_part(t.nomination_id,'-',1)||'th-congress/'||split_part(t.nomination_id,'-',3)"
+            nom_cong = self._congress_ordinal_sql("split_part(t.nomination_id,'-',1)")
+            nom_num = "regexp_replace(regexp_replace(t.nomination_id,'^[0-9]+-pn-',''),'-','/','g')"
+            source_url = f"'https://www.congress.gov/nomination/'||{nom_cong}||'-congress/'||{nom_num}"
             coverage['limits'].append('Pending means a known latest action without confirmed, withdrawn, returned or rejected wording in this snapshot. Missing latest actions remain unknown and are excluded.')
         else:
             key, field = 'event_id', 'meeting_date'

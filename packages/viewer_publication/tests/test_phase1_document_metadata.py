@@ -2,7 +2,9 @@
 import os
 from pathlib import Path
 
-from congress_api.retention.provenance import json_input,list_of,run_job
+import pytest
+
+from congress_api.retention.provenance import json_input,list_of,run_job,struct
 from docspec_client.client import NativeDatasets
 
 ROOT=Path(__file__).parents[3]
@@ -260,6 +262,27 @@ def test_document_removals_use_each_pages_latest_timestamp_and_require_all_remov
         ('removed', '2026-01-02'), ('tied', '2026-02-01'), (None, '2026-02-03')}
 
 
+def _saved_file_steps():
+    """Fixture members as document_members, then the name standing and the saved-file order as the model runs them."""
+    return [dict(name='document_members',sql="SELECT * EXCLUDE(first_fetched),cast(first_fetched AS TIMESTAMP WITH TIME ZONE) AS first_fetched FROM members"),
+            dict(name='saved_name_standing',sql=(ROOT/'model/sql/saved-name-standing.sql').read_text(),materialize=True),
+            dict(name='saved_files',sql=(ROOT/'model/sql/saved-files.sql').read_text(),materialize=True)]
+
+
+def _name_readings(tmp_path,members,said=None):
+    """What each member's name says: `said` maps a source to (official, families); every other name is plain and silent."""
+    said=said or {}
+    return json_input(tmp_path,'source_filename_readings',[dict(source_id=row['source_id'],valid=said.get(row['source_id'],(False,[]))[0],
+        document_family_status='completed',document_family=said.get(row['source_id'],(False,[]))[1]) for row in members],
+        source_id='Utf8',valid='Boolean',document_family_status='Utf8',document_family=list_of('Utf8'))
+
+
+def _name_decisions(tmp_path,rows=()):
+    """The reviewed name decisions the standing reads (saved-name-decisions.json); none unless a test plants some."""
+    from viewer_publication.archive_model import REGISTRIES
+    return json_input(tmp_path,'saved_name_decisions',list(rows),**REGISTRIES['saved_name_decisions'])
+
+
 def test_saved_file_order_picks_the_body_then_a_named_source_of_it(tmp_path):
     """A NULL-address unnamed source fetched later never names the saved body when a named one exists;
     a named ZIP member (no address of its own) keeps its place as a first-class copy."""
@@ -287,28 +310,362 @@ def test_saved_file_order_picks_the_body_then_a_named_source_of_it(tmp_path):
                   format='pdf',exact_bytes=True,first_fetched='2026-10-25T12:00:00Z',is_real_file=True),
              dict(component='ctx',source_id='addressed',body_sha='9'*64,filename='P.pdf',source_url='https://www.govinfo.gov/content/pkg/P/pdf/P.pdf',
                   format='pdf',exact_bytes=True,first_fetched='2026-10-20T12:00:00Z',is_real_file=True)]
-    for row in members: row['archive_member']=row['source_id']=='member'
+    for row in members: row.update(archive_member=row['source_id']=='member',body_stored=True)
     inputs=[json_input(tmp_path,'members',members,component='Utf8',source_id='Utf8',body_sha='Utf8',filename='Utf8',
-                       source_url='Utf8',format='Utf8',exact_bytes='Boolean',first_fetched='Utf8',is_real_file='Boolean',archive_member='Boolean'),
+                       source_url='Utf8',format='Utf8',exact_bytes='Boolean',first_fetched='Utf8',is_real_file='Boolean',archive_member='Boolean',
+                       body_stored='Boolean'),
             json_input(tmp_path,'formats',[dict(id='pdf',kind='preference',value='pdf',rank=1),dict(id='xml',kind='preference',value='xml',rank=3)],
-                       id='Utf8',kind='Utf8',value='Utf8',rank='Int32')]
+                       id='Utf8',kind='Utf8',value='Utf8',rank='Int32'),
+            _name_readings(tmp_path,members),_name_decisions(tmp_path)]
     result=run_job(tmp_path,NativeDatasets.from_config(os.environ['DOCSPEC_JOB_CONFIG']),inputs=inputs,
-        steps=[dict(name='document_members',sql="SELECT * EXCLUDE(first_fetched),cast(first_fetched AS TIMESTAMP WITH TIME ZONE) AS first_fetched FROM members"),
-               dict(name='saved_files',sql=(ROOT/'model/sql/saved-files.sql').read_text(),materialize=True)],outputs=[],
+        steps=_saved_file_steps(),outputs=[],
         queries=[dict(name='saved',sql='SELECT component,source_id,body_sha FROM saved_files WHERE saved_rank=1 ORDER BY component')])
     assert result['saved']==[dict(component='ctx',source_id='addressed',body_sha='9'*64),
                              dict(component='pdf',source_id='later',body_sha='c'*64),
                              dict(component='xml',source_id='named',body_sha='b'*64),
                              dict(component='zip',source_id='member',body_sha='e'*64)]
     order=run_job(tmp_path/'order',NativeDatasets.from_config(os.environ['DOCSPEC_JOB_CONFIG']),inputs=inputs,
-        steps=[dict(name='document_members',sql="SELECT * EXCLUDE(first_fetched),cast(first_fetched AS TIMESTAMP WITH TIME ZONE) AS first_fetched FROM members"),
-               dict(name='saved_files',sql=(ROOT/'model/sql/saved-files.sql').read_text(),materialize=True)],outputs=[],
+        steps=_saved_file_steps(),outputs=[],
         queries=[dict(name='o',sql="SELECT source_id FROM saved_files WHERE component='pdf' ORDER BY saved_rank")])['o']
     assert [row['source_id'] for row in order]==['later','third','fourth','earlier']
 
 
-def test_recovery_only_document_takes_the_recovered_reading_title_else_the_original_label(tmp_path):
-    """068f2a40 hard-coded NULL; DM 7.5 gives a recovery-only row a title like any other."""
+def test_a_later_capture_of_held_bytes_never_names_the_saved_body(tmp_path):
+    """ct-f7hp: a source file whose captures only found the archive already holding its bytes
+    (body_stored false; the 2026-11-08 run fetched 621 documents' bytes again at a mirror address) comes
+    after one that stored them, so the document keeps its name and what that name says. Naming and
+    the address still come first, the body never moves, and copies that each stored the bytes keep
+    saved-file order."""
+    official='https://docs.house.gov/meetings/ED/ED10/20250520/118261/HHRG-119-ED10-Wstate-PalagashviliL-20250520.pdf'
+    mirror='https://democrats-edworkforce.house.gov/imo/media/doc/'
+    def member(component,source_id,body,filename,url,fetched,stored):
+        return dict(component=component,source_id=source_id,body_sha=body*64,filename=filename,source_url=url,format='pdf',
+                    exact_bytes=True,first_fetched=fetched,is_real_file=True,archive_member=False,body_stored=stored)
+    early,late='2026-10-01T12:00:00Z','2026-11-08T18:00:00Z'
+    members=[
+        # An official name fetched first; the same bytes found again later under a generic name.
+        member('kept','official','a','HHRG-119-ED10-Wstate-PalagashviliL-20250520.pdf',official,early,True),
+        member('kept','generic','a','testimony7.pdf',mirror+'testimony7.pdf',late,False),
+        # The only named copy is the later one: a name still comes before who stored the bytes.
+        member('named','unnamed','b','','https://edworkforce.house.gov/download/?id=B6029D49',early,True),
+        member('named','later-name','b','akers_written_testimony.pdf',mirror+'akers_written_testimony.pdf',late,False),
+        # A recovery-only document captured live at its original address: its one file leads.
+        member('live','original','c','opening_statement11.pdf',mirror+'opening_statement11.pdf',late,False),
+        # A stored copy with neither an address nor a member path never blanks the published address.
+        member('address','addressless','d','P.pdf',None,early,True),
+        member('address','addressed','d','P.pdf',mirror+'P.pdf',late,False),
+        # The saved body is still the newest fetch, whoever stored what.
+        member('body','old-body','e','old.pdf','https://x.test/old.pdf',early,True),
+        member('body','new-body','f','new.pdf','https://x.test/new.pdf',late,False),
+        # Copies that each stored the bytes (every fetch before 2026-10-30 says so) keep saved-file order.
+        member('both','first','9','first.pdf','https://x.test/first.pdf',early,True),
+        member('both','second','9','second.pdf','https://x.test/second.pdf','2026-10-12T12:00:00Z',True)]
+    said=dict(official=(['witness-statement'],['statement'],[dict(field='Witness',value='PalagashviliL')]),
+              generic=(['testimony'],['statement'],[]))
+    annotations=[dict(source_id=row['source_id'],document_kind=said.get(row['source_id'],([],[],[]))[0],
+                      document_family=said.get(row['source_id'],([],[],[]))[1],facts=said.get(row['source_id'],([],[],[]))[2]) for row in members]
+    strings=list_of('Utf8')
+    inputs=[json_input(tmp_path,'members',members,component='Utf8',source_id='Utf8',body_sha='Utf8',filename='Utf8',
+                       source_url='Utf8',format='Utf8',exact_bytes='Boolean',first_fetched='Utf8',is_real_file='Boolean',
+                       archive_member='Boolean',body_stored='Boolean'),
+            json_input(tmp_path,'source_annotations',annotations,source_id='Utf8',document_kind=strings,document_family=strings,
+                       facts=list_of(struct(field='Utf8',value='Utf8'))),
+            json_input(tmp_path,'formats',[dict(id='pdf',kind='preference',value='pdf',rank=1)],id='Utf8',kind='Utf8',value='Utf8',rank='Int32'),
+            _name_readings(tmp_path,members,dict(official=(True,['statement']),generic=(False,['statement']))),_name_decisions(tmp_path)]
+    # The document row reads its name from the leading source file and its kind, family and facts from
+    # that file's annotation (document-normalized.sql joins the same two keys).
+    result=run_job(tmp_path,NativeDatasets.from_config(os.environ['DOCSPEC_JOB_CONFIG']),inputs=inputs,
+        steps=_saved_file_steps(),outputs=[],
+        queries=[dict(name='lead',sql="""SELECT s.component,s.source_id,s.body_sha,s.filename,s.source_url,a.document_kind,a.document_family,a.facts
+                      FROM saved_files s JOIN source_annotations a ON s.source_id=a.source_id WHERE s.saved_rank=1 ORDER BY s.component"""),
+                 dict(name='columns',sql="SELECT * FROM saved_files LIMIT 1")])
+    lead={row['component']:row for row in result['lead']}
+    assert {c:row['source_id'] for c,row in lead.items()}==dict(kept='official',named='later-name',live='original',
+        address='addressed',body='new-body',both='second')
+    assert (lead['kept']['filename'],lead['kept']['document_kind'],lead['kept']['document_family'],lead['kept']['facts'])==(
+        'HHRG-119-ED10-Wstate-PalagashviliL-20250520.pdf',['witness-statement'],['statement'],[dict(field='Witness',value='PalagashviliL')])
+    assert lead['body']['body_sha']=='f'*64
+    assert all(row['source_url'] for row in lead.values())
+    # The flag orders rows here and goes no further: saved_files keeps its columns.
+    assert 'body_stored' not in result['columns'][0] and 'name_standing' not in result['columns'][0]
+
+
+def test_an_official_name_leads_unless_a_committee_name_contradicts_it(tmp_path):
+    """ct-h8dr, ct-yuf0: a document takes its official House or GovInfo name whenever a copy of its saved
+    bytes has one, whichever copy was fetched last or stored the bytes; but when a committee's own name
+    for the same bytes states a kind and no committee name states the official name's, the committee
+    name leads when the official one is a House meeting-document slot (the House repository filed 54
+    testimonies under Bio and support-document names, one under another witness's surname) or the
+    generic House name (a cover page beside the committee's hearing notice). A GovInfo printed hearing
+    is also the hearing's transcript and nomination record, and an official vote record is also the
+    amendment it tallies, so those official names lead, though after an official name a committee name
+    agrees with outright. A body reviewed one by one takes the review's decision instead of any rule;
+    an undecided one keeps saved-file order. Any other contradicted official name stays where
+    saved-file order puts it. The saved body never moves, a body with no official name keeps
+    saved-file order, and every document whose names state different kinds is counted."""
+    house='https://docs.house.gov/meetings/XX/XX00/20200311/110712/'
+    congress='https://www.congress.gov/116/meeting/house/110712/witnesses/'
+    site='https://democrats-homeland.house.gov/imo/media/doc/'
+    early,middle,late='2026-10-01T12:00:00Z','2026-10-12T12:00:00Z','2026-10-31T00:11:00Z'
+    said,members={},[]
+    def member(component,source_id,body,filename,url,fetched,stored,official,families):
+        members.append(dict(component=component,source_id=source_id,body_sha=body*64,filename=filename,source_url=url,format='pdf',
+            exact_bytes=True,first_fetched=fetched,is_real_file=True,archive_member=False,body_stored=stored))
+        said[source_id]=(official,families)
+    # A testimony filed under a House Bio name: the committee's name and kind stay, though the House copy stored the bytes.
+    member('bio-slot','knox-house','1','HHRG-117-II13-Bio-KnoxJ-20211026.pdf',house+'HHRG-117-II13-Bio-KnoxJ-20211026.pdf',early,True,True,['biography'])
+    member('bio-slot','knox-site','1','Knox Testimony - WOW Ov Hrg 10.26.21.pdf',site+'Knox%20Testimony.pdf',late,False,False,['statement'])
+    # Bryan's testimony under Hentz's Bio name, at both official addresses.
+    member('bryan','hentz-house','2','HHRG-116-HM08-Bio-HentzA-20200311.pdf',house+'HHRG-116-HM08-Bio-HentzA-20200311.pdf',early,True,True,['biography'])
+    member('bryan','hentz-congress','2','HHRG-116-HM08-Bio-HentzA-20200311.pdf',congress+'HHRG-116-HM08-Bio-HentzA-20200311.pdf',middle,True,True,['biography'])
+    member('bryan','bryan-site','2','Testimony - Bryan.pdf',site+'Testimony%20-%20Bryan.pdf',late,False,False,['statement'])
+    # A real biography: the committee's name agrees, so the House name leads the newer committee copy.
+    member('real-bio','hayden-house','3','HHRG-118-HA00-Bio-HaydenC-20240710.pdf',house+'HHRG-118-HA00-Bio-HaydenC-20240710.pdf',early,True,True,['biography'])
+    member('real-bio','hayden-site','3','Bio_Dr.Carla Hayden.pdf',site+'Bio_Dr.Carla%20Hayden.pdf',middle,True,False,['biography'])
+    # Plain names beside a correct House name, one agreeing and one silent: the House name leads both.
+    member('plain','kessler-house','4','HHRG-119-ED10-Wstate-KesslerG-20260224.pdf',house+'HHRG-119-ED10-Wstate-KesslerG-20260224.pdf',early,True,True,['statement'])
+    member('plain','kessler-agrees','4','download_testimony95.pdf',site+'download_testimony95.pdf',middle,True,False,['statement'])
+    member('plain','kessler-silent','4','kessler.pdf',site+'kessler.pdf',late,True,False,[])
+    # A House support-document slot beside a committee name that states what the file is.
+    member('support-slot','memo-site','5','hearing_memo_03.20.2024.pdf',site+'hearing_memo_03.20.2024.pdf',early,True,False,['memorandum'])
+    member('support-slot','memo-house','5','HHRG-118-II06-20240320-SD003.pdf',house+'HHRG-118-II06-20240320-SD003.pdf',late,True,True,['supporting-material'])
+    # Two official names of different kinds: the one a committee name agrees with leads the newer one.
+    member('two-official','donaldson-wstate','6','HHRG-118-SY00-Wstate-DonaldsonT-20230419.pdf',house+'HHRG-118-SY00-Wstate-DonaldsonT-20230419.pdf',early,True,True,['statement'])
+    member('two-official','donaldson-site','6','2023-04-19-donaldson-testimony.pdf',site+'2023-04-19-donaldson-testimony.pdf',middle,True,False,['statement'])
+    member('two-official','odonnell-bio','6','HHRG-118-SY00-Bio-ODonnellS-20230419.pdf',house+'HHRG-118-SY00-Bio-ODonnellS-20230419.pdf',late,True,True,['biography'])
+    # Two official names of different kinds and no committee name: saved-file order holds (only a reading settles it).
+    member('unsettled','daigh-bio','7','HHRG-113-VR00-Bio-DaighJ-20140409.pdf',house+'HHRG-113-VR00-Bio-DaighJ-20140409.pdf',early,True,True,['biography'])
+    member('unsettled','daigh-wstate','7','HHRG-113-VR00-Wstate-DaighJ-20140409.pdf',house+'HHRG-113-VR00-Wstate-DaighJ-20140409.pdf',late,True,True,['statement'])
+    # No official name: a name that states a kind does not jump saved-file order.
+    member('no-official','ford-says','8','ford_testimony.pdf',site+'ford_testimony.pdf',early,True,False,['statement'])
+    member('no-official','ford-silent','8','6.27.2013-Ford.pdf',site+'6.27.2013-Ford.pdf',late,True,False,[])
+    # A committee name with no address cannot name the body, so it contradicts nothing.
+    member('addressless','smith-house','9','HHRG-118-XX00-Bio-SmithA-20240101.pdf',house+'HHRG-118-XX00-Bio-SmithA-20240101.pdf',early,True,True,['biography'])
+    member('addressless','smith-nowhere','9','Smith Testimony.pdf',None,late,True,False,['statement'])
+    # A GovInfo printed hearing is also the transcript and the nomination record: its name leads, whichever is newer.
+    gpo='https://www.govinfo.gov/content/pkg/'
+    member('hearing-new','chrg-new','c','CHRG-119shrg60688.pdf',gpo+'CHRG-119shrg60688/pdf/CHRG-119shrg60688.pdf',late,True,True,['published-hearing'])
+    member('hearing-new','transcript-old','c','S.HRG.119-99_Transcript.pdf',site+'S.HRG.119-99_Transcript.pdf',early,True,False,['transcript'])
+    member('hearing-old','chrg-old','d','CHRG-118shrg53651.pdf',gpo+'CHRG-118shrg53651/pdf/CHRG-118shrg53651.pdf',early,True,True,['published-hearing'])
+    member('hearing-old','transcript-new','d','S. Hrg. 118-126_Transcript_3.16.2023.pdf',site+'S.%20Hrg.%20118-126_Transcript.pdf',late,True,False,['transcript'])
+    member('nomination','chrg-vilsack','e','CHRG-117shrg44844.pdf',gpo+'CHRG-117shrg44844/pdf/CHRG-117shrg44844.pdf',early,True,True,['published-hearing'])
+    member('nomination','vilsack-site','e','S. Hrg. 117-56 - Nomination of Vilsack.pdf',site+'Vilsack.pdf',late,True,False,['nomination'])
+    # A House transcript name the committee's own name agrees with still leads the printed hearing of the same bytes.
+    member('hearing-house','ag-transcript','f','HHRG-119-AG22-Transcript-20250409.pdf',house+'HHRG-119-AG22-Transcript-20250409.pdf',early,True,True,['transcript'])
+    member('hearing-house','ag-site','f','04.09.25_transcript.pdf',site+'04.09.25_transcript.pdf',middle,True,False,['transcript'])
+    member('hearing-house','ag-chrg','f','CHRG-119hhrg63755.pdf',gpo+'CHRG-119hhrg63755/pdf/CHRG-119hhrg63755.pdf',late,True,True,['published-hearing'])
+    # An official vote record is also the amendment it tallies: its name leads the committee's amendment name.
+    member('tally','vote018','g','CRPT-118-WM00-Vote018-20230613.pdf',house+'CRPT-118-WM00-Vote018-20230613.pdf',early,True,True,['vote-record'])
+    member('tally','davis-site','g','3936-Davis-Amendment.pdf',site+'3936-Davis-Amendment.pdf',late,True,False,['amendment'])
+    # The generic House cover-page name gives way to the committee's hearing notice, though the House copy is newer.
+    member('cover-page','cpg-house','h','HHRG-115-SM00-20180410-CPg.pdf',house+'HHRG-115-SM00-20180410-CPg.pdf',late,True,True,['committee-document'])
+    member('cover-page','notice-site','h','4-10-18_hearing_notice.pdf',site+'4-10-18_hearing_notice.pdf',early,True,False,['notice'])
+    # Item 6 (ct-jcnd): a 3-copy body with a contradicted non-slot official name, a contradicted slot
+    # official name (fetched last), and a committee name keeps saved-file order between the non-slot
+    # official name and the committee name while the slot copy still gives way.
+    member('mixed-comm-newer','mixed1-bill','m','BILLS-118hr100ih.pdf',house+'BILLS-118hr100ih.pdf',early,True,True,['legislation'])
+    member('mixed-comm-newer','mixed1-amdt','m','committee_amendment.pdf',site+'committee_amendment.pdf',middle,True,False,['amendment'])
+    member('mixed-comm-newer','mixed1-slot','m','HHRG-118-XX00-20240320-SD001.pdf',house+'HHRG-118-XX00-20240320-SD001.pdf',late,True,True,['supporting-material'])
+    member('mixed-off-newer','mixed2-amdt','n','committee_amendment.pdf',site+'committee_amendment.pdf',early,True,False,['amendment'])
+    member('mixed-off-newer','mixed2-bill','n','BILLS-118hr100ih.pdf',house+'BILLS-118hr100ih.pdf',middle,True,True,['legislation'])
+    member('mixed-off-newer','mixed2-slot','n','HHRG-118-XX00-20240320-SD001.pdf',house+'HHRG-118-XX00-20240320-SD001.pdf',late,True,True,['supporting-material'])
+    # Reviewed one by one (saved_name_decisions): the review's name leads, whichever copy is newer.
+    member('reviewed-committee','bill-house','i','BILLS-118000rh.pdf',house+'BILLS-118000rh.pdf',late,True,True,['legislation'])
+    member('reviewed-committee','comparison-site','i','BILL-TO-BILL_BILLS-118hr3397rh_to_RCP_H3397_xml.pdf',site+'BILL-TO-BILL.pdf',early,True,False,['bill-comparison'])
+    member('reviewed-official','amdt-house','j','BILLS-119-0-S001195-Amdt-1-U9.pdf',house+'BILLS-119-0-S001195-Amdt-1-U9.pdf',early,True,True,['amendment'])
+    member('reviewed-official','letter-site','j','VE-Letter-AINS.pdf',site+'VE-Letter-AINS.pdf',late,True,False,['letter'])
+    # Reviewed but undecided: no rule decides it, so saved-file order holds where a rule would have moved it.
+    member('undecided-tally','vote010','k','CRPT-115-WM00-Vote010-20180711.pdf',house+'CRPT-115-WM00-Vote010-20180711.pdf',early,True,True,['vote-record'])
+    member('undecided-tally','chu-site','k','20180711-Chu-Amendment-for-AINS-to-H.R.-6306-1.pdf',site+'Chu.pdf',late,True,False,['amendment'])
+    member('undecided-cover','cpg-sm','l','HHRG-115-SM00-20180117-CPg.pdf',house+'HHRG-115-SM00-20180117-CPg.pdf',late,True,True,['committee-document'])
+    member('undecided-cover','notice-sm','l','1-17-18_hearing_notice.pdf',site+'1-17-18_hearing_notice.pdf',early,True,False,['notice'])
+    decisions=[dict(body_sha='i'*64,decision='committee',official_name='BILLS-118000rh.pdf',
+                    committee_name='BILL-TO-BILL_BILLS-118hr3397rh_to_RCP_H3397_xml.pdf',evidence='planted'),
+               dict(body_sha='j'*64,decision='official',official_name='BILLS-119-0-S001195-Amdt-1-U9.pdf',
+                    committee_name='VE-Letter-AINS.pdf',evidence='planted'),
+               dict(body_sha='k'*64,decision='undecided',official_name='CRPT-115-WM00-Vote010-20180711.pdf',
+                    committee_name='20180711-Chu-Amendment-for-AINS-to-H.R.-6306-1.pdf',evidence='planted'),
+               dict(body_sha='l'*64,decision='undecided',official_name='HHRG-115-SM00-20180117-CPg.pdf',
+                    committee_name='1-17-18_hearing_notice.pdf',evidence='planted'),
+               # A reviewed body no document saves any more (a newer fetch moved it): it decides nothing and is counted.
+               dict(body_sha='a'*64,decision='official',official_name='HHRG-118-XX00-Wstate-JonesB-20240101.pdf',
+                    committee_name='jones_testimony.pdf',evidence='planted')]
+    # The saved body is still the newest fetch: an official name on older bytes names nothing.
+    member('body','old-official','a','HHRG-118-XX00-Wstate-JonesB-20240101.pdf',house+'HHRG-118-XX00-Wstate-JonesB-20240101.pdf',early,True,True,['statement'])
+    member('body','new-plain','b','jones_revised.pdf',site+'jones_revised.pdf',late,True,False,[])
+    kinds=dict(biography='witness-biography',statement='testimony',memorandum='committee-memorandum')
+    kinds.update({'supporting-material':'meeting-support','published-hearing':'published-hearing','transcript':'transcript',
+        'nomination':'nomination','vote-record':'committee-vote','amendment':'amendment','committee-document':'committee-document',
+        'notice':'hearing-notice','legislation':'bill-numbered','bill-comparison':'bill-comparison','letter':'letter'})
+    annotations=[dict(source_id=row['source_id'],document_family=said[row['source_id']][1],
+        document_kind=[('witness-statement' if said[row['source_id']][0] and f=='statement' else kinds[f]) for f in said[row['source_id']][1]]) for row in members]
+    strings=list_of('Utf8')
+    inputs=[json_input(tmp_path,'members',members,component='Utf8',source_id='Utf8',body_sha='Utf8',filename='Utf8',
+                       source_url='Utf8',format='Utf8',exact_bytes='Boolean',first_fetched='Utf8',is_real_file='Boolean',
+                       archive_member='Boolean',body_stored='Boolean'),
+            json_input(tmp_path,'source_annotations',annotations,source_id='Utf8',document_kind=strings,document_family=strings),
+            json_input(tmp_path,'formats',[dict(id='pdf',kind='preference',value='pdf',rank=1)],id='Utf8',kind='Utf8',value='Utf8',rank='Int32'),
+            _name_readings(tmp_path,members,said),_name_decisions(tmp_path,decisions)]
+    from viewer_publication.archive_model import SAVED_NAME_DECISIONS_UNUSED,SAVED_NAME_KINDS
+    result=run_job(tmp_path,NativeDatasets.from_config(os.environ['DOCSPEC_JOB_CONFIG']),inputs=inputs,
+        steps=_saved_file_steps()+[dict(name='saved_name_conflicts',sql=(ROOT/'model/sql/saved-name-conflicts.sql').read_text(),materialize=True)],outputs=[],
+        queries=[dict(name='lead',sql="""SELECT s.component,s.source_id,s.body_sha,s.filename,a.document_kind,a.document_family
+                      FROM saved_files s JOIN source_annotations a ON s.source_id=a.source_id WHERE s.saved_rank=1 ORDER BY s.component"""),
+                 dict(name='conflicts',sql="SELECT * FROM saved_name_conflicts ORDER BY component"),SAVED_NAME_KINDS,SAVED_NAME_DECISIONS_UNUSED,
+                 dict(name='rows',sql="SELECT count(*) AS n,count(DISTINCT source_id) AS sources FROM saved_files")])
+    lead={row['component']:row for row in result['lead']}
+    assert {c:row['source_id'] for c,row in lead.items()}=={'bio-slot':'knox-site','bryan':'bryan-site','real-bio':'hayden-house',
+        'plain':'kessler-house','support-slot':'memo-site','two-official':'donaldson-wstate','unsettled':'daigh-wstate',
+        'no-official':'ford-silent','addressless':'smith-house','hearing-new':'chrg-new','hearing-old':'chrg-old','nomination':'chrg-vilsack',
+        'hearing-house':'ag-transcript','tally':'vote018','cover-page':'notice-site','mixed-comm-newer':'mixed1-amdt',
+        'mixed-off-newer':'mixed2-bill','reviewed-committee':'comparison-site',
+        'reviewed-official':'amdt-house','undecided-tally':'chu-site','undecided-cover':'cpg-sm','body':'new-plain'}
+    for component,name in (('bio-slot','Knox Testimony - WOW Ov Hrg 10.26.21.pdf'),('bryan','Testimony - Bryan.pdf')):
+        assert (lead[component]['filename'],lead[component]['document_kind'],lead[component]['document_family'])==(name,['testimony'],['statement'])
+    assert (lead['real-bio']['filename'],lead['real-bio']['document_kind'])==('HHRG-118-HA00-Bio-HaydenC-20240710.pdf',['witness-biography'])
+    assert (lead['plain']['filename'],lead['plain']['document_kind'])==('HHRG-119-ED10-Wstate-KesslerG-20260224.pdf',['witness-statement'])
+    assert (lead['support-slot']['filename'],lead['support-slot']['document_kind'])==('hearing_memo_03.20.2024.pdf',['committee-memorandum'])
+    assert lead['body']['body_sha']=='b'*64 and result['rows']==[dict(n=len(members),sources=len(members))]
+    # Every document whose leading name's kind another name of the same bytes does not share, and who leads it.
+    flags=lambda component,*values:dict(component=component,**dict(zip(('official_leads','official_slot','committee_speaks','committee_agrees'),values)))
+    assert result['conflicts']==[flags('bio-slot',False,False,False,False),flags('bryan',False,False,False,False),
+        flags('cover-page',False,False,False,False),flags('hearing-house',True,False,True,True),
+        flags('hearing-new',True,False,True,False),flags('hearing-old',True,False,True,False),
+        flags('mixed-comm-newer',False,False,False,False),flags('mixed-off-newer',True,False,True,False),
+        flags('nomination',True,False,True,False),
+        flags('reviewed-committee',False,False,False,False),flags('reviewed-official',True,False,True,False),
+        flags('support-slot',False,False,False,False),flags('tally',True,False,True,False),flags('two-official',True,True,True,True),
+        flags('undecided-cover',True,False,True,False),flags('undecided-tally',False,False,False,False),flags('unsettled',True,True,False,False)]
+    assert result['saved_name_kinds']==[dict(documents=17,committee_name_leads=7,official_name_leads_with_committee_agreement=2,
+        official_names_disagree_unsettled=1,other_official_name_leads_contradicted=7,slot_name_leads_contradicted=0)]
+    assert result['saved_name_decisions_unused']==[dict(entries=1)]
+
+
+def test_the_name_conflict_step_sees_a_slot_name_leading_against_a_committee_name(tmp_path):
+    """ct-yuf0: the conflict step reads the saved files, not the name standing, so it sees an order the
+    rule must never produce. Planted: a House Bio name leading a committee "testimony" name of the same
+    bytes is the one row the invariant counts. A GovInfo hearing leading a committee "transcript" is
+    listed but not refused; names that share a kind, a name on other bytes and a name with no
+    address list nothing."""
+    from viewer_publication.archive_model import CONTRADICTED_OFFICIAL_SAVED_NAMES_SQL, SAVED_NAME_KINDS
+    said,files={},[]
+    def saved(component,source_id,body,rank,official,families,url='https://x.test/f.pdf'):
+        files.append(dict(component=component,source_id=source_id,body_sha=body*64,filename=source_id+'.pdf',source_url=url,
+            archive_member=False,saved_rank=rank))
+        said[source_id]=(official,families)
+    saved('planted','HHRG-116-HM08-Bio-HentzA-20200311','1',1,True,['biography']); saved('planted','Testimony - Bryan','1',2,False,['statement'])
+    saved('agreed','HHRG-119-ED10-Wstate-KesslerG-20260224','2',1,True,['statement']); saved('agreed','kessler_testimony','2',2,False,['statement'])
+    saved('hearing','CHRG-119shrg60688','3',1,True,['published-hearing']); saved('hearing','S.HRG.119-99_Transcript','3',2,False,['transcript'])
+    saved('other-bytes','HHRG-118-XX00-Bio-JonesB-20240101','4',1,True,['biography']); saved('other-bytes','jones_testimony','5',2,False,['statement'])
+    saved('addressless','HHRG-118-XX00-Bio-SmithA-20240101','6',1,True,['biography']); saved('addressless','Smith Testimony','6',2,False,['statement'],url=None)
+    inputs=[json_input(tmp_path,'saved_files',files,component='Utf8',source_id='Utf8',body_sha='Utf8',filename='Utf8',source_url='Utf8',
+                       archive_member='Boolean',saved_rank='Int64'),
+            _name_readings(tmp_path,files,said)]
+    result=run_job(tmp_path,NativeDatasets.from_config(os.environ['DOCSPEC_JOB_CONFIG']),inputs=inputs,
+        steps=[dict(name='saved_name_conflicts',sql=(ROOT/'model/sql/saved-name-conflicts.sql').read_text(),materialize=True)],outputs=[],
+        queries=[dict(name='listed',sql='SELECT component FROM saved_name_conflicts ORDER BY component'),
+                 dict(name='refused',sql=CONTRADICTED_OFFICIAL_SAVED_NAMES_SQL+" AND component='planted'"),
+                 dict(name='all_refused',sql=CONTRADICTED_OFFICIAL_SAVED_NAMES_SQL),SAVED_NAME_KINDS])
+    assert [row['component'] for row in result['listed']]==['hearing','planted']
+    assert [list(row.values()) for row in result['refused']]==[[1]] and [list(row.values()) for row in result['all_refused']]==[[1]]
+    assert result['saved_name_kinds']==[dict(documents=2,committee_name_leads=0,official_name_leads_with_committee_agreement=0,
+        official_names_disagree_unsettled=0,other_official_name_leads_contradicted=1,slot_name_leads_contradicted=1)]
+
+
+def test_the_reviewed_name_decisions_are_keyed_by_saved_bytes_and_hold_what_no_rule_settles():
+    """ct-h8dr: the 343 documents whose non-slot official name a committee name contradicts were read one by
+    one (.cache/archive-release/investigations/name-clash-review-20261110; the 25 it left undecided were read
+    2026-11-11, name-clash-25-20261111). The rules settle 259 as read (132 printed hearings, 59 vote tallies,
+    67 cover pages and a table of contents). The registry holds the other 83 decided ones and the 1 with neither
+    name right, keyed by the saved body's sha256, which no release renumbers. A neither (or undecided) entry
+    keeps saved-file order, so that one stays as published."""
+    import json,re
+    from collections import Counter
+    from viewer_publication.archive_model import REGISTRIES
+    assert REGISTRIES['saved_name_decisions']==dict(body_sha='Utf8',decision='Utf8',official_name='Utf8',committee_name='Utf8',evidence='Utf8')
+    rows=json.loads((ROOT/'model/registries/saved-name-decisions.json').read_text())
+    assert all(re.fullmatch('[0-9a-f]{64}',row['body_sha']) and row['evidence'] and row['official_name'] and row['committee_name']
+               for row in rows)
+    assert len({row['body_sha'] for row in rows})==len(rows)
+    assert Counter(row['decision'] for row in rows)==dict(committee=65,official=18,neither=1)
+
+
+def test_the_name_decisions_registry_is_refused_at_load_when_a_decision_could_act_unread(tmp_path):
+    """Review finding 2 (2026-11-10): a mistyped decision acted as undecided, and the recorded names were
+    never loaded. The loader refuses each planted failure, as it does the reviewed bill evidence."""
+    import json,shutil
+    from copy import deepcopy
+    from viewer_publication.archive_model import registry_inputs
+    rows=json.loads((ROOT/'model/registries/saved-name-decisions.json').read_text())
+    for mutate in (
+        lambda r: r[0].update(decision='comittee'),            # a typo acted as undecided
+        lambda r: r[0].update(decision=None),
+        lambda r: r[0].update(committee_name=None),            # nothing to meet the decision with
+        lambda r: r[0].update(official_name=''),
+        lambda r: r[0].update(committee_name='a.pdf | '),      # an empty name in a list
+        lambda r: r[0].update(official_name='a.pdf |b.pdf'),  # a list joined without the separator's spaces
+        lambda r: r.append(deepcopy(r[0])),                    # one body, two decisions
+        lambda r: r[0].update(body_sha=r[0]['body_sha'].upper()),
+        lambda r: r[0].update(evidence=''),
+    ):
+        root=tmp_path/str(len(list(tmp_path.iterdir())))
+        shutil.copytree(ROOT/'model/registries',root/'model/registries')
+        bad=deepcopy(rows); mutate(bad)
+        (root/'model/registries/saved-name-decisions.json').write_text(json.dumps(bad))
+        with pytest.raises(ValueError,match='reviewed name decision'):
+            registry_inputs(root/'inputs',root=root)
+    assert any(i['name']=='saved_name_decisions' for i in registry_inputs(tmp_path/'real'))
+
+
+def test_a_decision_led_by_a_name_the_review_never_read_is_counted(tmp_path):
+    """ct-jcnd item 1 (review finding 2): saved-name-standing grants standing 1 only to a copy whose filename
+    is among the decision's recorded names, so a newer unreviewed copy ('Comparison-v2.pdf' or 'Amdt-2.pdf')
+    cannot silently override the reviewed copy ('BILL-TO-BILL.pdf' or 'BILLS-119-0-S001195-Amdt-1-U9.pdf') when
+    both exist. When the reviewed copy is absent ('only-unread') or an undecided body leads under a third unread
+    name ('third'), saved_name_decisions_unmet counts each unmet decision."""
+    from viewer_publication.archive_model import SAVED_NAME_DECISIONS_UNMET,SAVED_NAME_DECISIONS_UNUSED
+    site='https://committee.house.gov/doc/'
+    early,middle,late='2026-10-01T12:00:00Z','2026-10-12T12:00:00Z','2026-10-31T00:11:00Z'
+    said,members={},[]
+    def member(component,source_id,body,filename,fetched,official,families):
+        members.append(dict(component=component,source_id=source_id,body_sha=body*64,filename=filename,source_url=site+source_id,
+            format='pdf',exact_bytes=True,first_fetched=fetched,is_real_file=True,archive_member=False,body_stored=True))
+        said[source_id]=(official,families)
+    member('renamed','bill','1','BILLS-118000rh.pdf',early,True,['legislation'])
+    member('renamed','read','1','BILL-TO-BILL.pdf',middle,False,['bill-comparison'])
+    member('renamed','unread','1','Comparison-v2.pdf',late,False,['bill-comparison'])
+    member('met','amdt','2','BILLS-119-0-S001195-Amdt-1-U9.pdf',early,True,['amendment'])
+    member('met','amdt-unread','2','BILLS-119-0-S001195-Amdt-2-U9.pdf',middle,True,['amendment'])
+    member('met','letter','2','VE-Letter-AINS.pdf',late,False,['letter'])
+    member('third','official','3','BILLS-1145033ih.pdf',early,True,['legislation'])
+    member('third','ans','3','HR-5033-ANS.pdf',middle,False,['amendment'])
+    member('third','slw','3','SLW_311_xml.pdf',late,False,[])
+    member('listed','one','4','hearing_notice.pdf',early,False,['notice'])
+    member('listed','two','4','HHRG-115-SM00-20180117-CPg.pdf',late,True,['committee-document'])
+    member('only-unread','bill-only','6','BILLS-118000rh.pdf',early,True,['legislation'])
+    member('only-unread','unread-only','6','Comparison-v2.pdf',late,False,['bill-comparison'])
+    decisions=[dict(body_sha='1'*64,decision='committee',official_name='BILLS-118000rh.pdf',committee_name='BILL-TO-BILL.pdf',evidence='planted'),
+               dict(body_sha='2'*64,decision='official',official_name='BILLS-119-0-S001195-Amdt-1-U9.pdf',committee_name='VE-Letter-AINS.pdf',evidence='planted'),
+               dict(body_sha='3'*64,decision='undecided',official_name='BILLS-1145033ih.pdf',committee_name='HR-5033-ANS.pdf',evidence='planted'),
+               dict(body_sha='4'*64,decision='undecided',official_name='HHRG-115-SM00-20180117-CPg.pdf',committee_name='notice.pdf | hearing_notice.pdf',evidence='planted'),
+               dict(body_sha='5'*64,decision='official',official_name='gone.pdf',committee_name='gone_too.pdf',evidence='planted'),
+               dict(body_sha='6'*64,decision='committee',official_name='BILLS-118000rh.pdf',committee_name='BILL-TO-BILL.pdf',evidence='planted')]
+    inputs=[json_input(tmp_path,'members',members,component='Utf8',source_id='Utf8',body_sha='Utf8',filename='Utf8',
+                       source_url='Utf8',format='Utf8',exact_bytes='Boolean',first_fetched='Utf8',is_real_file='Boolean',
+                       archive_member='Boolean',body_stored='Boolean'),
+            json_input(tmp_path,'formats',[dict(id='pdf',kind='preference',value='pdf',rank=1)],id='Utf8',kind='Utf8',value='Utf8',rank='Int32'),
+            _name_readings(tmp_path,members,said),_name_decisions(tmp_path,decisions)]
+    result=run_job(tmp_path,NativeDatasets.from_config(os.environ['DOCSPEC_JOB_CONFIG']),inputs=inputs,steps=_saved_file_steps(),outputs=[],
+        queries=[dict(name='lead',sql='SELECT component,filename FROM saved_files WHERE saved_rank=1 ORDER BY component'),
+                 SAVED_NAME_DECISIONS_UNMET,SAVED_NAME_DECISIONS_UNUSED])
+    assert {row['component']:row['filename'] for row in result['lead']}=={'renamed':'BILL-TO-BILL.pdf','met':'BILLS-119-0-S001195-Amdt-1-U9.pdf',
+        'third':'SLW_311_xml.pdf','listed':'HHRG-115-SM00-20180117-CPg.pdf','only-unread':'Comparison-v2.pdf'}
+    assert result['saved_name_decisions_unmet']==[dict(entries=2)]
+    assert result['saved_name_decisions_unused']==[dict(entries=1)]
+
+
+def test_recovery_only_document_reads_the_recovered_page_title_and_the_original_link_text(tmp_path):
+    """068f2a40 hard-coded NULL; DM 7.5 gives a recovery-only row the title evidence of any other (titles.sql chooses)."""
     from congress_api.retention.provenance import list_of, struct
     strings = list_of('Utf8')
     recoveries = [dict(component=c, saved_rank=1, id=c, body_sha=b, original_url=f'https://x.test/{c}.pdf', bytes=10,
@@ -317,17 +674,17 @@ def test_recovery_only_document_takes_the_recovered_reading_title_else_the_origi
                       meeting_keys=[], measure_keys=[], bioguide_ids=[], package_id=None, facts=[])
     from viewer_publication.archive_model import registry_inputs
     inputs = registry_inputs(tmp_path / 'registries') + [json_input(tmp_path, 'saved_recoveries', recoveries, component='Utf8', saved_rank='Int64', id='Utf8', body_sha='Utf8',
-                         original_url='Utf8', bytes='Int64', imported_at='Utf8')] + [
+                         original_url='Utf8', bytes='Int64', imported_at='Utf8', role='Utf8', page_shown='Utf8')] + [
         json_input(tmp_path, 'document_identities', [dict(component=c, document_id='doc:' + c, has_real=False) for c in ('read', 'label')],
                    component='Utf8', document_id='Utf8', has_real='Boolean'),
         json_input(tmp_path, 'effective_filenames', [dict(input_id='recovery:' + c, filename=c + '.pdf') for c in ('read', 'label')],
                    input_id='Utf8', filename='Utf8'),
         json_input(tmp_path, 'source_files', [dict(source_id='s:' + c, body_sha=None, source_url=f'https://x.test/{c}.pdf', filename=c + '.pdf')
                    for c in ('read', 'label')], source_id='Utf8', body_sha='Utf8', source_url='Utf8', filename='Utf8'),
-        json_input(tmp_path, 'source_annotations', [dict(annotation, source_id='s:read', title='Original label'),
-                   dict(annotation, source_id='s:label', title='Hearing on Rural Lands')], source_id='Utf8', title='Utf8',
+        json_input(tmp_path, 'source_annotations', [dict(annotation, source_id='s:read', listing_title='Original label'),
+                   dict(annotation, source_id='s:label', listing_title='Hearing on Rural Lands')], source_id='Utf8', listing_title='Utf8',
                    document_kind=strings, document_family=strings, committee_keys=strings, chambers=strings, congress='Int32',
-                   filename_date='Utf8', meeting_keys=strings, measure_keys=strings, bioguide_ids=strings, package_id='Utf8',
+                   filename_date='Date32', meeting_keys=strings, measure_keys=strings, bioguide_ids=strings, package_id='Utf8',
                    facts=list_of(struct(field='Utf8', value='Utf8'))),
         json_input(tmp_path, 'evidence', [dict(body_sha=b, format='html', suffix='') for b in ('a' * 64, 'b' * 64)],
                    body_sha='Utf8', format='Utf8', suffix='Utf8'),
@@ -335,17 +692,20 @@ def test_recovery_only_document_takes_the_recovered_reading_title_else_the_origi
                                        dict(body_hex='b' * 64, status='completed', title='Untitled', heading=None)],
                    body_hex='Utf8', status='Utf8', title='Utf8', heading='Utf8'),
         json_input(tmp_path, 'capture_rows', [dict(body_hex='a' * 64, media_type='text/html')], body_hex='Utf8', media_type='Utf8'),
-        json_input(tmp_path, 'component_meeting_links', [], component='Utf8', meeting_date='Utf8', meeting_keys=strings, committee_keys=strings, chambers=strings, congress='Int16'),
-        json_input(tmp_path, 'document_witness_keys', [], component='Utf8', witness_keys=strings, witness_name='Utf8')]
+        json_input(tmp_path, 'component_meeting_links', [], component='Utf8', meeting_date='Date32', meeting_keys=strings, committee_keys=strings, chambers=strings, congress='Int16'),
+        json_input(tmp_path, 'document_witness_keys', [], component='Utf8', witness_keys=strings, witness_name='Utf8'),
+        json_input(tmp_path, 'package_mods_facts', [], package_id='Utf8', held_dates=strings, title='Utf8', committees=strings)]
     steps = [dict(name='body_evidence', sql='SELECT * FROM evidence'),
-             dict(name='page_facts', sql="SELECT decode(body_hex,'hex') AS body_sha,status,title,heading,cast(NULL AS DATE) AS content_date FROM pages"),
+             dict(name='page_facts', sql="SELECT decode(body_hex,'hex') AS body_sha,status,title,heading,cast(NULL AS DATE) AS content_date,cast(NULL AS VARCHAR) AS xml_root,cast(NULL AS VARCHAR) AS text_head FROM pages"),
              dict(name='source_annotation_pages', sql=(ROOT / 'model/sql/source-annotations-pages.sql').read_text()),
              dict(name='captures', sql="SELECT decode(body_hex,'hex') AS sha256,media_type FROM capture_rows"),
              dict(name='recovery_rows', sql=(ROOT / 'model/sql/document-recovery-normalized.sql').read_text())]
     result = run_job(tmp_path, NativeDatasets.from_config(os.environ['DOCSPEC_JOB_CONFIG']), inputs=inputs, steps=steps, outputs=[],
-        queries=[dict(name='titles', sql='SELECT doc_key,title,media_type FROM recovery_rows ORDER BY doc_key')])
-    assert result['titles'] == [dict(doc_key='doc:label', title='Hearing on Rural Lands', media_type='application/octet-stream'),
-                                dict(doc_key='doc:read', title='Recovered hearing record', media_type='text/html')]
+        queries=[dict(name='titles', sql='SELECT doc_key,own_title,own_title_source,link_title,media_type FROM recovery_rows ORDER BY doc_key')])
+    assert result['titles'] == [dict(doc_key='doc:label', own_title=None, own_title_source=None, link_title='Hearing on Rural Lands',
+                                     media_type='application/octet-stream'),
+                                dict(doc_key='doc:read', own_title='Recovered hearing record', own_title_source='page_title',
+                                     link_title='Original label', media_type='text/html')]
 
 
 def test_a_blank_filename_needs_a_recorded_reason(tmp_path):
@@ -373,14 +733,36 @@ def test_a_blank_filename_needs_a_recorded_reason(tmp_path):
 
 
 def test_the_generic_title_check_is_its_own_rule(tmp_path):
-    """Independent of the page-signals link_word list: only format, size and download words."""
+    """Independent of the page-signals link_word list: only format, size and download words, and a title
+    with no letter in any script (review finding 7: that class came only from the rule's own pattern)."""
     from viewer_publication.archive_model import GENERIC_TITLE_SQL
     titles = ['PDF (48.1 MB)', 'Download XML (6KB)', 'ZIP', 'click here', 'Overview of the Hearing',
-              'Testimony of Jane Doe (PDF, 2 MB)', '2024', None]
+              'Testimony of Jane Doe (PDF, 2 MB)', '2024', '$1.5', '中文', None]
     inputs = [json_input(tmp_path, 'ordered', [dict(i=i, title=t) for i, t in enumerate(titles)], i='Int64', title='Utf8')]
     result = run_job(tmp_path, NativeDatasets.from_config(os.environ['DOCSPEC_JOB_CONFIG']), inputs=inputs, steps=[], outputs=[],
         queries=[dict(name='g', sql=f'SELECT i,coalesce({GENERIC_TITLE_SQL},false) AS generic FROM ordered o ORDER BY i')])
-    assert [row['generic'] for row in result['g']] == [True, True, True, True, False, False, False, False]
+    assert [row['generic'] for row in result['g']] == [True, True, True, True, False, False, True, True, False, False]
+
+
+def test_a_letterless_title_refuses_with_the_rules_pattern_removed(tmp_path):
+    """Review finding 7 (2026-11-10): the gate's letterless class came only from the rule's own pattern
+    (title-rules link_word_no_name). Planted: that entry removed from the registry; the gate still
+    refuses every letterless title, of any length, and still keeps letters of any script."""
+    import json, shutil
+    from viewer_publication.archive_model import GENERIC_TITLES_SQL, registry_inputs
+    root = tmp_path / 'root'
+    shutil.copytree(ROOT / 'model/registries', root / 'model/registries')
+    signals = root / 'model/registries/title-rules.json'
+    kept = [r for r in json.loads(signals.read_text()) if r['id'] != 'link_word_no_name']
+    assert len(kept) == len(json.loads(signals.read_text())) - 1
+    signals.write_text(json.dumps(kept))
+    letterless = ['12', '_3', '.', '16-4', '$1.5', '19-26-03-26-19', '2024 - ' + '0' * 70]
+    titles = letterless + ['中文', 'H.R. 1', 'Overview of the Hearing', None]
+    inputs = registry_inputs(tmp_path / 'registries', root=root) + [json_input(tmp_path, 'ordered', [dict(doc_key=str(i), title=t)
+        for i, t in enumerate(titles)], doc_key='Utf8', title='Utf8')]
+    result = run_job(tmp_path, NativeDatasets.from_config(os.environ['DOCSPEC_JOB_CONFIG']), inputs=inputs, steps=[], outputs=[],
+        queries=[dict(name='g', sql=f'SELECT title FROM ({GENERIC_TITLES_SQL}) g ORDER BY title')])
+    assert sorted(row['title'] for row in result['g']) == sorted(letterless)
 
 
 def test_a_title_generic_by_either_rule_refuses(tmp_path):
@@ -393,6 +775,84 @@ def test_a_title_generic_by_either_rule_refuses(tmp_path):
     result = run_job(tmp_path, NativeDatasets.from_config(os.environ['DOCSPEC_JOB_CONFIG']), inputs=inputs, steps=[], outputs=[],
         queries=[dict(name='g', sql=f'SELECT title FROM ({GENERIC_TITLES_SQL}) g ORDER BY title')])
     assert sorted(row['title'] for row in result['g']) == sorted(titles[:10])
+
+
+def test_a_title_with_no_name_in_it_refuses(tmp_path):
+    """ct-ccsi: a title with no letter, or a numbering word and a number, is a link word for the gate
+    as for the rule; a number after a name, and letters of any script, are a title."""
+    from viewer_publication.archive_model import GENERIC_TITLES_SQL, registry_inputs
+    titles = ['12', '_3', '.', '16-4', '$1.5', '19-26-03-26-19', 'no. 3', 'No 8', 'Number 12', 'nos. 3-5',
+              'Amendment No. 3', 'Exhibit 3', 'Version 2', 'No', 'H.R. 1', '中文', 'Number of Farms in 2022', None]
+    inputs = registry_inputs(tmp_path / 'registries') + [json_input(tmp_path, 'ordered', [dict(doc_key=str(i), title=t)
+        for i, t in enumerate(titles)], doc_key='Utf8', title='Utf8')]
+    result = run_job(tmp_path, NativeDatasets.from_config(os.environ['DOCSPEC_JOB_CONFIG']), inputs=inputs, steps=[], outputs=[],
+        queries=[dict(name='g', sql=f'SELECT title FROM ({GENERIC_TITLES_SQL}) g ORDER BY title')])
+    assert sorted(row['title'] for row in result['g']) == sorted(titles[:10])
+
+
+def test_a_bill_number_placeholder_is_a_link_word(tmp_path):
+    """Review finding 9 & ct-jcnd item 7: bill/resolution placeholders ('H.R. ___', 'H.R.___,', 'H.Res.___',
+    'S ___.pdf'), 'Download ...' link labels ('Download General', 'Download Bio', 'Download QFR Responses'),
+    and bare filenames ('BILLS-116hr5430rfs.pdf') pass over to the next real link text and are refused as
+    published titles when <= 64 chars, while real numbered bills, multi-word titles, and 'Downloads ...' stay."""
+    from viewer_publication.archive_model import GENERIC_TITLES_SQL, registry_inputs
+    links = [
+        ('placeholder', 'H.R. ___'),
+        ('placeholder-comma', 'H.R.___,'),
+        ('hres-placeholder', 'H.Res.___'),
+        ('senate-pdf-placeholder', 'S ___.pdf'),
+        ('placeholder-then-name', 'H.R.___'),
+        ('placeholder-then-name', 'Discussion Draft of the Farm Act'),
+        ('senate', 'S. ____'),
+        ('download-label', 'Download General'),
+        ('download-bio-then-name', 'Download Bio'),
+        ('download-bio-then-name', 'Biography of Hon. Jane Doe'),
+        ('download-qfr', 'Download Responses to Questions for the Record'),
+        ('filename-then-bill', 'BILLS-116hr5430rfs.pdf'),
+        ('filename-then-bill', 'H.R. 5430'),
+        ('downloads-heading', 'Downloads and Hearing Records'),
+        ('numbered', 'H.R. 5430'),
+        ('named', 'S. ___, Traumatic Brain Injury Program Reauthorization Act of 2018.pdf'),
+    ]
+    rows = [dict(source_id=source, text=text, doc_type=None, first_good_at=f'2026-10-{i + 1:02d}T12:00:00Z', context='c', page_body='p',
+                 link_index=i, split_position=0) for i, (source, text) in enumerate(links)]
+    sources = sorted({source for source, _ in links})
+    inputs = [i for i in registry_inputs(tmp_path / 'registries') if i['name'] in ('title_rules', 'publisher_kinds')] + [
+        json_input(tmp_path, 'links', rows, source_id='Utf8', text='Utf8', doc_type='Utf8', first_good_at='Utf8', context='Utf8',
+                   page_body='Utf8', link_index='Int64', split_position='Int64'),
+        json_input(tmp_path, 'source_files', [dict(source_id=s) for s in sources], source_id='Utf8'),
+        json_input(tmp_path, 'ordered', [dict(doc_key=str(i), title=text) for i, (_, text) in enumerate(links)], doc_key='Utf8', title='Utf8')]
+    steps = [dict(name='publisher_links', sql="SELECT * EXCLUDE(first_good_at),cast(first_good_at AS TIMESTAMP WITH TIME ZONE) AS first_good_at FROM links")]
+    result = run_job(tmp_path / 'job', NativeDatasets.from_config(os.environ['DOCSPEC_JOB_CONFIG']), inputs=inputs, steps=steps, outputs=[],
+        queries=[dict(name='listing', sql='SELECT source_id,listing_title FROM ('+(ROOT / 'model/sql/source-annotations-publisher.sql').read_text()+') a ORDER BY 1'),
+                 dict(name='generic', sql=f'SELECT DISTINCT title FROM ({GENERIC_TITLES_SQL}) g ORDER BY title')])
+    assert {row['source_id']: row['listing_title'] for row in result['listing']} == {
+        'download-bio-then-name': 'Biography of Hon. Jane Doe',
+        'download-label': None,
+        'download-qfr': None,
+        'downloads-heading': 'Downloads and Hearing Records',
+        'filename-then-bill': 'H.R. 5430',
+        'hres-placeholder': None,
+        'named': links[-1][1],
+        'numbered': 'H.R. 5430',
+        'placeholder': None,
+        'placeholder-comma': None,
+        'placeholder-then-name': 'Discussion Draft of the Farm Act',
+        'senate': None,
+        'senate-pdf-placeholder': None,
+    }
+    assert [row['title'] for row in result['generic']] == sorted([
+        'BILLS-116hr5430rfs.pdf',
+        'Download Bio',
+        'Download General',
+        'Download Responses to Questions for the Record',
+        'H.R. ___',
+        'H.R.___',
+        'H.R.___,',
+        'H.Res.___',
+        'S ___.pdf',
+        'S. ____',
+    ])
 
 
 def test_the_generic_title_gate_checks_the_titles_the_link_word_rule_keeps(tmp_path):
@@ -410,7 +870,7 @@ def test_the_generic_title_gate_checks_the_titles_the_link_word_rule_keeps(tmp_p
              for i, t in enumerate([aging, 'Click here', 'Download testimony'])]
     inputs = registry_inputs(tmp_path / 'registries') + [json_input(tmp_path, 'pages', pages,
         body_hex='Utf8', status='Utf8', title='Utf8', heading='Utf8')]
-    steps = [dict(name='page_facts', sql="SELECT decode(body_hex,'hex') AS body_sha,status,title,heading,cast(NULL AS DATE) AS content_date FROM pages"),
+    steps = [dict(name='page_facts', sql="SELECT decode(body_hex,'hex') AS body_sha,status,title,heading,cast(NULL AS DATE) AS content_date,cast(NULL AS VARCHAR) AS xml_root,cast(NULL AS VARCHAR) AS text_head FROM pages"),
              dict(name='source_annotation_pages', sql=(ROOT / 'model/sql/source-annotations-pages.sql').read_text()),
              dict(name='ordered', sql="SELECT encode(body_sha,'hex') AS doc_key,title FROM source_annotation_pages")]
     result = run_job(tmp_path, NativeDatasets.from_config(os.environ['DOCSPEC_JOB_CONFIG']), inputs=inputs, steps=steps, outputs=[],
@@ -418,3 +878,167 @@ def test_the_generic_title_gate_checks_the_titles_the_link_word_rule_keeps(tmp_p
                  dict(name='generic', sql=f'SELECT title FROM ({GENERIC_TITLES_SQL}) g')])
     assert [row['title'] for row in result['kept']] == [aging]
     assert result['generic'] == []
+
+
+def test_senate_html_urls_ending_in_bare_uuid_retain_slug_filename_kind_and_family(tmp_path):
+    """ct-esuu: Senate HTML pages whose final path segment is a bare UUID preceded by a descriptive
+    slug retain their slug-derived filename, document_kind, document_family, and facts both when an
+    earlier trailing-slash slug capture exists on the component and when fetched only at /<slug>/<uuid>,
+    without turning generic container paths like /services/files/<uuid> into slug filenames."""
+    import gzip
+    import hashlib
+    import json
+    import pyarrow.parquet as pq
+    from archive_job_fixture import rebuild_model_spec
+    from congress_api.lake import readings
+    from congress_api.retention.provenance import file_pin
+    from viewer_publication.archive_model import build_release
+
+    raw = tmp_path / 'raw'
+    raw.mkdir()
+    sniff_ver = readings.current_version('sniff')
+
+    def write_body(title, extra=b''):
+        html = (
+            b'<html><head><title>' + title.encode() + b'</title></head><body><main><p>'
+            + (title.encode() + b' substantive committee meeting record. ') * 40
+            + b'</p></main>' + extra + b'</body></html>'
+        )
+        digest = hashlib.sha256(html).hexdigest()
+        stored = gzip.compress(html, mtime=0)
+        dest = raw / 'bodies/sha256' / digest[:2] / f'{digest}.gz'
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(stored)
+        return digest, len(html), len(stored), hashlib.md5(stored).hexdigest()
+
+    b1_old = write_body('Business Meeting: Pending Nominations')
+    b1_new = write_body('Business Meeting: Pending Nominations', b'<!-- recapture 2026-11-12 -->')
+    b2_only = write_body('Nomination Business Meeting')
+    b3_container = write_body('Uploaded Committee Handout')
+
+    u1_canon = 'https://www.energy.senate.gov/hearings/2021/11/business-meeting-pending-nominations/60bdf4d2-9524-4699-9553-caf33a0da8be'
+    u1_slash = 'https://www.energy.senate.gov/hearings/hearings-2021-11-business-meeting-pending-nominations-60bdf4d2-9524-4699-9553-caf33a0da8be/'
+    u2_canon = 'https://www.energy.senate.gov/hearings/2021/5/nomination-business-meeting/5c20db43-6834-46b2-b92f-40c4c719a379'
+    u3_files = 'https://www.energy.senate.gov/hearings/deadbeef-1234-4567-89ab-cdef01234567'
+
+    def fetch_row(req_url, final_url, retrieved_at, body_tuple):
+        digest, raw_len, stored_len, md5_hex = body_tuple
+        return dict(
+            writer=dict(job='fixture', commit='a' * 40),
+            run_id='fixture',
+            mode='fetch',
+            family='documents',
+            outcome='stored',
+            requested_url=req_url,
+            url=final_url,
+            http_status=200,
+            complete=True,
+            retrieved_at=retrieved_at,
+            captures=[dict(
+                sha256=digest,
+                bytes=raw_len,
+                media_type='text/html',
+                fidelity='exact-bytes',
+                sniffed_format='html',
+                sniff_version=sniff_ver,
+                stored_suffix='.gz',
+                stored_bytes=stored_len,
+                stored_md5=md5_hex,
+            )],
+        )
+
+    receipt_rows = [
+        fetch_row(u1_slash, u1_slash, '2026-10-05T12:00:00Z', b1_old),
+        fetch_row(u1_canon, u1_slash, '2026-11-11T12:00:00Z', b1_new),
+        fetch_row(u2_canon, u2_canon, '2026-11-11T12:05:00Z', b2_only),
+        fetch_row(u3_files, u3_files, '2026-11-11T12:10:00Z', b3_container),
+    ]
+    receipt = raw / 'receipts/documents/2026-11-11/slice.jsonl.gz'
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    receipt.write_bytes(gzip.compress((''.join(json.dumps(r) + '\n' for r in receipt_rows)).encode(), mtime=0))
+    pin = tmp_path / 'receipt-pin.json'
+    pin.write_text(json.dumps(dict(path=str(receipt), **file_pin(receipt), producer='fixture creation')))
+
+    spec = rebuild_model_spec(
+        tmp_path,
+        raw=raw,
+        receipts=[('receipts/documents/2026-11-11/slice.jsonl.gz', pin)],
+    )
+    release = tmp_path / 'release'
+    with NativeDatasets.from_config(os.environ['DOCSPEC_JOB_CONFIG']) as engine:
+        build_release(
+            captures=spec['captures']['path'],
+            readings=spec['readings']['path'],
+            filename_readings=spec['filename_readings']['path'],
+            parser_versions=spec['parser_versions'],
+            catalog_version=spec['catalog_version'],
+            engine=engine,
+            output=release,
+            scratch=tmp_path / 'model',
+        )
+
+    list_rows = pq.read_table(release / 'list.parquet').to_pylist()
+    detail_rows = pq.read_table(release / 'detail.parquet').to_pylist()
+    by_title = {
+        l_row['title']: (l_row, d_row)
+        for l_row, d_row in zip(list_rows, detail_rows)
+    }
+    expected_facts = [
+        {'field': 'document_family', 'value': 'business-meeting'},
+        {'field': 'document_kind', 'value': 'business-meeting'},
+    ]
+
+    l1, d1 = by_title['Business Meeting: Pending Nominations']
+    assert l1['filename'] == 'hearings-2021-11-business-meeting-pending-nominations-60bdf4d2-9524-4699-9553-caf33a0da8be'
+    assert l1['document_kind'] == ['business-meeting']
+    assert l1['document_family'] == ['business-meeting']
+    assert d1['facts'] == expected_facts
+
+    l2, d2 = by_title['Nomination Business Meeting']
+    assert l2['filename'] == 'nomination-business-meeting-5c20db43-6834-46b2-b92f-40c4c719a379'
+    assert l2['document_kind'] == ['business-meeting']
+    assert l2['document_family'] == ['business-meeting']
+    assert d2['facts'] == expected_facts
+
+    l3, d3 = by_title['Uploaded Committee Handout']
+    assert l3['filename'] == 'deadbeef-1234-4567-89ab-cdef01234567'
+    assert l3['document_kind'] == []
+    assert l3['document_family'] == []
+    assert d3['facts'] == []
+
+
+def test_bare_uuid_html_ignores_unrelated_secondary_trailing_slash_url(tmp_path):
+    """P2-5a (ct-esuu): mode_rank=1 trailing_seg must contain uuid_name so an unrelated secondary
+    trailing-slash address on the component cannot replace the <slug>-<uuid> filename."""
+    import json
+    uuid_str = '5c20db43-6834-46b2-b92f-40c4c719a379'
+    inputs = [
+        json_input(tmp_path, 'html_uuid_candidates', [
+            dict(doc_key='d1', component=1, filename=uuid_str,
+                 source_url=f'https://www.energy.senate.gov/hearings/2021/5/nomination-business-meeting/{uuid_str}'),
+            dict(doc_key='d2', component=2, filename=uuid_str,
+                 source_url=f'https://www.energy.senate.gov/hearings/2021/5/nomination-business-meeting/{uuid_str}'),
+        ], doc_key='Utf8', component='Int64', filename='Utf8', source_url='Utf8'),
+        json_input(tmp_path, 'saved_files', [], component='Int64', source_id='Utf8', format='Utf8', filename='Utf8', saved_rank='Int64'),
+        json_input(tmp_path, 'source_annotations', [], source_id='Utf8', document_kind=list_of('Utf8'), document_family=list_of('Utf8'),
+                   facts=list_of(struct(field='Utf8', value='Utf8'))),
+        json_input(tmp_path, 'document_addresses', [
+            # Unrelated trailing-slash address without the UUID: must be ignored!
+            dict(component=1, url='https://www.energy.senate.gov/subcommittee-on-water/'),
+            # Redirected trailing-slash slug address containing the UUID: wins mode_rank=1!
+            dict(component=2, url=f'https://www.energy.senate.gov/hearings/hearings-2021-5-nomination-business-meeting-{uuid_str}/'),
+        ], component='Int64', url='Utf8'),
+        json_input(tmp_path, 'display_facts',
+                   json.loads((ROOT / 'model/registries/display-facts.json').read_text()),
+                   id='Utf8', field='Utf8', label='Utf8'),
+    ]
+    res = run_job(
+        tmp_path / 'job', NativeDatasets.from_config(os.environ['DOCSPEC_JOB_CONFIG']),
+        inputs=inputs, steps=[], outputs=[],
+        queries=[dict(name='fills', sql='SELECT doc_key,filename FROM (' + (ROOT / 'model/sql/html-uuid-slug-fills.sql').read_text() + ') ORDER BY doc_key')],
+    )['fills']
+    assert res == [
+        dict(doc_key='d1', filename=f'nomination-business-meeting-{uuid_str}'),
+        dict(doc_key='d2', filename=f'hearings-2021-5-nomination-business-meeting-{uuid_str}'),
+    ]
+

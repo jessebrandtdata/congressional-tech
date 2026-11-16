@@ -4,12 +4,21 @@ Each case runs the real version functions against a checkout whose only change i
 one locked version, so a stable identity is the code's result and not a fixture's.
 """
 import json
+import os
 from pathlib import Path
 import re
 
 import pytest
 
-from congress_api.lake import appearance_records, committee_records, filenames, meeting_records, versions
+from congress_api.lake import (
+    appearance_records,
+    committee_records,
+    filenames,
+    meeting_records,
+    playlist_records,
+    versions,
+    video_records,
+)
 
 ROOT = Path(__file__).resolve().parents[3]
 PUBLISHED = json.loads((ROOT / 'model/jobs/publish-model.json').read_text())
@@ -23,11 +32,26 @@ def identities(root=ROOT):
     return result
 
 
+def all_identities(root=ROOT):
+    result = identities(root=root)
+    result.update({f'playlist_records.{s}': v for s, v in playlist_records.current_versions(root=root).items()})
+    result.update({f'video_records.{s}': v for s, v in video_records.current_versions(root=root).items()})
+    return result
+
+
 def published():
     pins = PUBLISHED['parser_versions']
     result = {f'{table}.{s}': v for table in ('appearance_records', 'meeting_records', 'committee_records')
               for s, v in pins[table].items()}
     result['filename_readings'] = PUBLISHED['catalog_version']
+    return result
+
+
+def all_published():
+    pins = PUBLISHED['parser_versions']
+    result = published()
+    for table in ('playlist_records', 'video_records'):
+        result.update({f'{table}.{s}': v for s, v in pins[table].items()})
     return result
 
 
@@ -44,14 +68,14 @@ def bumped_checkout(tmp_path, package):
 
 
 def test_current_identities_are_the_published_pins():
-    assert identities() == published()
+    assert all_identities() == all_published()
 
 
 # aiohttp, pyasn1, urllib3, certifi and pillow were the pending security patches
 # (ct-680z). pypdf feeds only readings, which carry declared versions.
 @pytest.mark.parametrize('package', ['aiohttp', 'pyasn1', 'urllib3', 'certifi', 'pillow', 'pypdf', 'boto3'])
 def test_an_unrelated_locked_package_leaves_every_identity(tmp_path, package):
-    assert identities(bumped_checkout(tmp_path, package)) == published()
+    assert all_identities(bumped_checkout(tmp_path, package)) == all_published()
 
 
 @pytest.mark.parametrize('package,moved', [
@@ -63,7 +87,7 @@ def test_an_unrelated_locked_package_leaves_every_identity(tmp_path, package):
     ('pyarrow', set(published())),
 ])
 def test_an_imported_package_moves_exactly_its_importers(tmp_path, package, moved):
-    before, after = published(), identities(bumped_checkout(tmp_path, package))
+    before, after = all_published(), all_identities(bumped_checkout(tmp_path, package))
     assert {name for name in before if after[name] != before[name]} == moved
     assert all(after[name] not in versions._REVIEWED_PRODUCER_VERSIONS.values() for name in moved)
 
@@ -71,8 +95,9 @@ def test_an_imported_package_moves_exactly_its_importers(tmp_path, package, move
 def test_each_reviewed_entry_is_a_current_fingerprint_of_its_published_pin(monkeypatch):
     reviewed = dict(versions._REVIEWED_PRODUCER_VERSIONS)
     monkeypatch.setattr(versions, '_REVIEWED_PRODUCER_VERSIONS', {})
-    fingerprints = identities()
-    assert reviewed == {fingerprints[name]: pin for name, pin in published().items()}
+    fingerprints = all_identities()
+    # A producer whose published pin is its own fingerprint (a deliberate bump since ct-an6o) needs no entry.
+    assert reviewed == {fingerprints[name]: pin for name, pin in all_published().items() if fingerprints[name] != pin}
 
 
 @pytest.mark.parametrize('name', ['meeting_records.house_xml', 'filename_readings'])
@@ -92,3 +117,51 @@ def test_an_import_without_a_locked_package_refuses(tmp_path):
     module.write_text('import PIL\n')
     with pytest.raises(ValueError, match='Imports without a locked package: PIL'):
         versions.ImportClosure(ROOT).locked_versions([module])
+
+
+@pytest.fixture
+def case_insensitive_disk(monkeypatch, tmp_path):
+    """Paths under tmp_path resolve as on macOS's case-insensitive disk, on any host: file checks
+    and directory listings both accept a name that differs only in case."""
+    base, is_file, listdir = tmp_path.resolve(), Path.is_file, os.listdir
+
+    def fold(path):
+        path = Path(path)
+        if not path.is_relative_to(base):
+            return path
+        found = base
+        for name in path.relative_to(base).parts:
+            names = listdir(found) if found.is_dir() else []
+            found = found / next((n for n in names if n.casefold() == name.casefold()), name)
+            if not found.exists():
+                return None
+        return found
+
+    def folded_listdir(path='.'):
+        if (real := fold(path)) is None:
+            raise FileNotFoundError(path)
+        return listdir(real)
+
+    monkeypatch.setattr(Path, 'is_file', lambda self, *a, **k: (real := fold(self)) is not None and is_file(real))
+    monkeypatch.setattr(os, 'listdir', folded_listdir)
+    return base
+
+
+def test_an_imported_name_is_a_submodule_only_when_a_file_has_exactly_its_name(case_insensitive_disk):
+    """ct-p394: on macOS, `from house_naming import Engine` resolved to Engine.py and hashed engine.py a
+    second time under a name Linux does not have, so the two hosts' reading evidence differed. The walk
+    resolves a module as Python imports one, by exact name, whatever the disk accepts."""
+    root = case_insensitive_disk
+    (root / 'uv.lock').write_text('version = 1\n\n[[package]]\nname = "pkg"\nversion = "0.1.0"\n'
+                                  'source = { editable = "pkg" }\n')
+    package = root / 'pkg/src/pkg'
+    (package / 'sub').mkdir(parents=True)
+    (package / '__init__.py').write_text('from .engine import Engine\nfrom .sub import Sub\n')
+    (package / 'engine.py').write_text('class Engine: ...\n')
+    (package / 'sub/__init__.py').write_text('class Sub: ...\n')
+    (root / 'reader.py').write_text('from pkg import Engine, Sub\n')
+    assert (package / 'Engine.py').is_file() and (package / 'Sub/__init__.py').is_file()  # the disk folds case
+    workspace, external = versions.ImportClosure(root).reachable(['reader.py'])
+    assert sorted(path.relative_to(root).as_posix() for path in workspace) == [
+        'pkg/src/pkg/__init__.py', 'pkg/src/pkg/engine.py', 'pkg/src/pkg/sub/__init__.py', 'reader.py']
+    assert external == set()

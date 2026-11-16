@@ -1165,6 +1165,338 @@
         "real_file": false
       },
       "source": "Same request/final addresses as 9230 with a neutral page: a file request that lands on an HTML page is not a real file"
+    },
+    {
+      "id": "site-help-page",
+      "input": {
+        "mode": "fetch",
+        "outcome": "stored",
+        "complete": true,
+        "sha256": "site-help-page",
+        "bytes": 15105,
+        "context_url": "https://fixture.test/committee/Help.aspx",
+        "url": "https://fixture.test/committee/Help.aspx",
+        "member_path": null,
+        "format": "html",
+        "intact": null,
+        "intact_basis": "unchecked",
+        "reading_status": "completed",
+        "xml_root": null,
+        "title": "Help | Committee Repository",
+        "heading": "",
+        "text_head": "Help. About this website. Finding committee documents. Contact the Clerk for assistance with this repository.",
+        "text_bytes": 1800,
+        "link_count": 12,
+        "link_text_bytes": 300,
+        "http_status": 200
+      },
+      "expected": {
+        "record_role": "wrapper",
+        "real_file": false
+      },
+      "source": "ct-aoxp: a site's help page is furniture, linked from every page's chrome, never a document (shape of docs.house.gov/committee/Help.aspx, 15,105 bytes, published as a document of 81 meetings in 619db5f9e08e)"
+    },
+    {
+      "id": "file-request-redirected-to-help-page",
+      "input": {
+        "mode": "fetch",
+        "outcome": "stored",
+        "complete": true,
+        "sha256": "file-request-redirected-to-help-page",
+        "bytes": 15105,
+        "context_url": "https://fixture.test/meetings/AG/AG00/20261020/119000/a.pdf",
+        "url": "https://fixture.test/committee/Help.aspx",
+        "member_path": null,
+        "format": "html",
+        "intact": null,
+        "intact_basis": "unchecked",
+        "reading_status": "completed",
+        "xml_root": null,
+        "title": "Help | Committee Repository",
+        "heading": "",
+        "text_head": "Help. About this website. Finding committee documents. Contact the Clerk for assistance with this repository.",
+        "text_bytes": 1800,
+        "link_count": 12,
+        "link_text_bytes": 300,
+        "http_status": 200,
+        "requested_url": "https://fixture.test/meetings/AG/AG00/20261020/119000/a.pdf"
+      },
+      "expected": {
+        "record_role": "wrapper",
+        "real_file": false
+      },
+      "source": "ct-aoxp: the address that answered decides; a file request that lands on the help page is not the file"
+    },
+    {
+      "id": "help-committee-page-is-a-document",
+      "input": {
+        "mode": "fetch",
+        "outcome": "stored",
+        "complete": true,
+        "sha256": "help-committee-page-is-a-document",
+        "bytes": 15105,
+        "context_url": "https://fixture.test/committees/help",
+        "url": "https://fixture.test/committees/help",
+        "member_path": null,
+        "format": "html",
+        "intact": null,
+        "intact_basis": "unchecked",
+        "reading_status": "completed",
+        "xml_root": null,
+        "title": "Committee on Health, Education, Labor and Pensions",
+        "heading": "",
+        "text_head": "The committee will meet to consider pending nominations and legislation on health care and education.",
+        "text_bytes": 1800,
+        "link_count": 12,
+        "link_text_bytes": 300,
+        "http_status": 200
+      },
+      "expected": {
+        "record_role": "document",
+        "real_file": true
+      },
+      "source": "ct-aoxp boundary: a page whose last path segment is 'help' with no file extension (the Senate HELP committee) stays a document"
+    },
+    {
+      "id": "site-calendar-listing-page",
+      "input": {
+        "mode": "fetch",
+        "outcome": "stored",
+        "complete": true,
+        "sha256": "site-calendar-listing-page",
+        "bytes": 22860,
+        "context_url": "https://agriculture.house.gov/calendar/eventslisting.aspx?CategoryID=14887",
+        "url": "https://agriculture.house.gov/calendar/eventslisting.aspx?CategoryID=14887",
+        "member_path": null,
+        "format": "html",
+        "intact": null,
+        "intact_basis": "unchecked",
+        "reading_status": "completed",
+        "xml_root": null,
+        "title": "Event List | House Agriculture Committee",
+        "heading": "Event List",
+        "text_head": "Skip to Content Menu close menu about Chairman Thompson Membership Committee History Rules and Jurisdiction news Press Releases Opening Statements Op-Eds ICYMIs Blog Newsletters subcommittees General",
+        "text_bytes": 3311,
+        "link_count": 72,
+        "link_text_bytes": 1648,
+        "http_status": 200
+      },
+      "expected": {
+        "record_role": "wrapper",
+        "real_file": false
+      },
+      "source": "ct-xj8s: a committee calendar listing is site furniture; reading facts of the page published as list row 291552 in release 77673bfb8fcf, linked from 14 captured pages"
+    },
+    {
+      "id": "site-event-page-is-a-document",
+      "input": {
+        "mode": "fetch",
+        "outcome": "stored",
+        "complete": true,
+        "sha256": "site-event-page-is-a-document",
+        "bytes": 19210,
+        "context_url": "https://agriculture.house.gov/calendar/eventsingle.aspx?EventID=3939",
+        "url": "https://agriculture.house.gov/calendar/eventsingle.aspx?EventID=3939",
+        "member_path": null,
+        "format": "html",
+        "intact": null,
+        "intact_basis": "unchecked",
+        "reading_status": "completed",
+        "xml_root": null,
+        "title": "Full Committee - Farm Bill Listening Session: Conversations in the Field | House Agriculture Committee",
+        "heading": "Hearings",
+        "text_head": "Skip to Content Menu close menu about Chairman Thompson Membership Committee History Rules and Jurisdiction news Press Releases Opening Statements Op-Eds ICYMIs Blog Newsletters subcommittees General",
+        "text_bytes": 1493,
+        "link_count": 80,
+        "link_text_bytes": 1024,
+        "http_status": 200
+      },
+      "expected": {
+        "record_role": "document",
+        "real_file": true
+      },
+      "source": "ct-xj8s boundary: an event page on the same site is a real page, linked often or not (list row 291171 in release 77673bfb8fcf, linked from 18 pages)"
+    },
+    {
+      "id": "site-committee-activity-index",
+      "input": {
+        "mode": "fetch",
+        "outcome": "stored",
+        "complete": true,
+        "sha256": "site-committee-activity-index",
+        "bytes": 121726,
+        "context_url": "https://democrats-transportation.house.gov/committee-activity/markups",
+        "url": "https://democrats-transportation.house.gov/committee-activity/markups",
+        "member_path": null,
+        "format": "html",
+        "intact": null,
+        "intact_basis": "unchecked",
+        "reading_status": "completed",
+        "xml_root": null,
+        "title": "Markups | Hearings & Activities | The House Committee on Transportation and Infrastructure",
+        "heading": "Committee On Transportation & Infrastructure",
+        "text_head": "Skip to content Close Home About Jurisdiction and Rules Membership Subcommittees Ranking Member Rick Larsen Hearings & Activities Hearings Markups Issues Whistleblower Rights Investigations Press",
+        "text_bytes": 4008,
+        "link_count": 98,
+        "link_text_bytes": 1563,
+        "http_status": 200
+      },
+      "expected": {
+        "record_role": "wrapper",
+        "real_file": false
+      },
+      "source": "ct-xj8s: a committee-activity index page is site furniture (list row 308859 in release 77673bfb8fcf, linked from 1,491 captured pages)"
+    },
+    {
+      "id": "site-home-page",
+      "input": {
+        "mode": "fetch",
+        "outcome": "stored",
+        "complete": true,
+        "sha256": "site-home-page",
+        "bytes": 65527,
+        "context_url": "https://www.govinfo.gov/",
+        "url": "https://www.govinfo.gov/",
+        "member_path": null,
+        "format": "html",
+        "intact": null,
+        "intact_basis": "unchecked",
+        "reading_status": "completed",
+        "xml_root": null,
+        "title": "GovInfo | U.S. Government Publishing Office",
+        "heading": "Discover U.S. Government Information",
+        "text_head": "Skip to main content Menu Browse A to Z Category Date Committee Author About About Policies Authentication Digital Preservation History Agency Submission",
+        "text_bytes": 3367,
+        "link_count": 165,
+        "link_text_bytes": 2437,
+        "http_status": 200
+      },
+      "expected": {
+        "record_role": "wrapper",
+        "real_file": false
+      },
+      "source": "ct-xj8s: a site's home page is furniture (list row 95 in release 77673bfb8fcf, linked from 35,363 captured pages)"
+    },
+    {
+      "id": "site-root-article-is-a-document",
+      "input": {
+        "mode": "fetch",
+        "outcome": "stored",
+        "complete": true,
+        "sha256": "site-root-article-is-a-document",
+        "bytes": 68193,
+        "context_url": "https://oversight.house.gov/?option=com_content&view=article&id=1223%253A3-31-11-qwhy-isnt-the-department-of-homeland-security-meeting-the-presidents-standard-on-foiaq&catid=12&Itemid=1",
+        "url": "https://oversight.house.gov/?option=com_content&view=article&id=1223%253A3-31-11-qwhy-isnt-the-department-of-homeland-security-meeting-the-presidents-standard-on-foiaq&catid=12&Itemid=1",
+        "member_path": null,
+        "format": "html",
+        "intact": null,
+        "intact_basis": "unchecked",
+        "reading_status": "completed",
+        "xml_root": null,
+        "title": "United States House Committee on Oversight and Government Reform -",
+        "heading": null,
+        "text_head": "Skip to main content Toggle navigation Search About Chairman James Comer Full Committee Rules Committee Activity Calendar Hearings",
+        "text_bytes": 4343,
+        "link_count": 155,
+        "link_text_bytes": 2888,
+        "http_status": 200
+      },
+      "expected": {
+        "record_role": "document",
+        "real_file": true
+      },
+      "source": "ct-xj8s boundary: an article served at a site root with a query is a real page, not the home page (list row 305426 in release 77673bfb8fcf)"
+    },
+    {
+      "id": "dead-press-release-redirected-to-news-index",
+      "input": {
+        "mode": "fetch",
+        "outcome": "stored",
+        "complete": true,
+        "sha256": "dead-press-release-redirected-to-news-index",
+        "bytes": 386726,
+        "context_url": "https://republicans-energycommerce.house.gov/news/bilirakis-this-is-a-historic-bill-that-puts-control-of-data-back-into-the-hands-of-everyday-americans/",
+        "url": "https://republicans-energycommerce.house.gov/news",
+        "member_path": null,
+        "format": "html",
+        "intact": null,
+        "intact_basis": "unchecked",
+        "reading_status": "completed",
+        "xml_root": null,
+        "title": "House Committee on Energy and Commerce",
+        "heading": "News",
+        "text_head": "Skip to main contentSubscribeMembersSubcommitteesCalendarNews & MediaAboutMembersSubcommitteesCalendarNews & MediaAbout",
+        "text_bytes": 41297,
+        "link_count": 587,
+        "link_text_bytes": 1227,
+        "http_status": 200,
+        "requested_url": "https://republicans-energycommerce.house.gov/news/bilirakis-this-is-a-historic-bill-that-puts-control-of-data-back-into-the-hands-of-everyday-americans/"
+      },
+      "expected": {
+        "record_role": "wrapper",
+        "real_file": false
+      },
+      "source": "ct-xj8s: a removed press release that redirects to the news index is that index, not the release (list row 311317 in release 77673bfb8fcf: three press-release requests answered by /news)"
+    },
+    {
+      "id": "govinfo-content-details-page",
+      "input": {
+        "mode": "fetch",
+        "outcome": "stored",
+        "complete": true,
+        "sha256": "govinfo-content-details-page",
+        "bytes": 61000,
+        "context_url": "https://www.govinfo.gov/app/details/CHRG-115hhrg24725",
+        "url": "https://www.govinfo.gov/app/details/CHRG-115hhrg24725",
+        "member_path": null,
+        "format": "html",
+        "intact": null,
+        "intact_basis": "unchecked",
+        "reading_status": "completed",
+        "xml_root": null,
+        "title": "Serial No. 115-3 - THE NEXT FARM BILL - CHRG-115hhrg24725 | Content Details | GovInfo",
+        "heading": "Content Details",
+        "text_head": "Skip to main content Browse A to Z Category Date Committee Author About About Policies Authentication Digital Preservation History Agency Submission U.S. Government Information FDsys Retirement Developers",
+        "text_bytes": 2933,
+        "link_count": 91,
+        "link_text_bytes": 1028,
+        "http_status": 200
+      },
+      "expected": {
+        "record_role": "wrapper",
+        "real_file": false
+      },
+      "source": "ct-m878: a GovInfo Content Details page describes the package's file and holds none of its text; reading facts of CHRG-115hhrg24725's page in 619db5f9e08e, published there as a document"
+    },
+    {
+      "id": "govinfo-package-text-is-a-document",
+      "input": {
+        "mode": "fetch",
+        "outcome": "stored",
+        "complete": true,
+        "sha256": "govinfo-package-text-is-a-document",
+        "bytes": 152000,
+        "context_url": "https://www.govinfo.gov/content/pkg/CHRG-118hhrg53014/html/CHRG-118hhrg53014.htm",
+        "url": "https://www.govinfo.gov/content/pkg/CHRG-118hhrg53014/html/CHRG-118hhrg53014.htm",
+        "member_path": null,
+        "format": "html",
+        "intact": null,
+        "intact_basis": "unchecked",
+        "reading_status": "completed",
+        "xml_root": null,
+        "title": "- THE STATE OF THE AMERICAN ECONOMY: APPALACHIA",
+        "heading": "",
+        "text_head": "[House Hearing, 118 Congress] [From the U.S. Government Publishing Office] THE STATE OF THE AMERICAN ECONOMY: APPALACHIA",
+        "text_bytes": 150000,
+        "link_count": 3,
+        "link_text_bytes": 40,
+        "http_status": 200
+      },
+      "expected": {
+        "record_role": "document",
+        "real_file": true
+      },
+      "source": "ct-m878 boundary: the hearing's HTML text at GovInfo, the file its Content Details page describes, stays a document"
     }
   ],
   "groups": [
@@ -1180,7 +1512,7 @@
           "entry_index": null,
           "fingerprint": null,
           "directory": "https://fixture.test/files/",
-          "stem": "p1",
+          "stem": "report",
           "is_real_file": true
         },
         {
@@ -1192,7 +1524,7 @@
           "entry_index": null,
           "fingerprint": null,
           "directory": "https://fixture.test/files/",
-          "stem": "p2",
+          "stem": "report",
           "is_real_file": true
         },
         {
@@ -1204,7 +1536,7 @@
           "entry_index": null,
           "fingerprint": null,
           "directory": "https://fixture.test/files/",
-          "stem": "x",
+          "stem": "report",
           "is_real_file": true
         },
         {
@@ -1216,7 +1548,7 @@
           "entry_index": null,
           "fingerprint": null,
           "directory": "https://fixture.test/files/",
-          "stem": "xm",
+          "stem": "report",
           "is_real_file": true
         }
       ],
@@ -1301,7 +1633,7 @@
           "entry_index": null,
           "fingerprint": null,
           "directory": "https://fixture.test/files/",
-          "stem": "m1",
+          "stem": "shared",
           "is_real_file": true
         },
         {
@@ -1313,7 +1645,7 @@
           "entry_index": null,
           "fingerprint": null,
           "directory": "https://fixture.test/files/",
-          "stem": "m2",
+          "stem": "shared",
           "is_real_file": true
         },
         {
@@ -1325,7 +1657,7 @@
           "entry_index": null,
           "fingerprint": null,
           "directory": "https://fixture.test/files/",
-          "stem": "x1",
+          "stem": "shared",
           "is_real_file": true
         },
         {
@@ -1337,7 +1669,7 @@
           "entry_index": null,
           "fingerprint": null,
           "directory": "https://fixture.test/files/",
-          "stem": "x2",
+          "stem": "shared",
           "is_real_file": true
         }
       ],
@@ -1400,7 +1732,7 @@
           "entry_index": null,
           "fingerprint": null,
           "directory": "https://fixture.test/files/",
-          "stem": "p1",
+          "stem": "report",
           "is_real_file": true
         },
         {
@@ -1412,7 +1744,7 @@
           "entry_index": null,
           "fingerprint": null,
           "directory": "https://fixture.test/files/",
-          "stem": "p2",
+          "stem": "report",
           "is_real_file": true
         },
         {
@@ -1424,7 +1756,7 @@
           "entry_index": null,
           "fingerprint": null,
           "directory": "https://fixture.test/files/",
-          "stem": "x1",
+          "stem": "report",
           "is_real_file": true
         },
         {
@@ -1436,7 +1768,7 @@
           "entry_index": null,
           "fingerprint": null,
           "directory": "https://fixture.test/files/",
-          "stem": "x2",
+          "stem": "report",
           "is_real_file": true
         }
       ],
@@ -1490,7 +1822,7 @@
           "entry_index": 2,
           "fingerprint": null,
           "directory": "https://fixture.test/files/",
-          "stem": "old",
+          "stem": "report",
           "is_real_file": true
         },
         {
@@ -1502,7 +1834,7 @@
           "entry_index": 4,
           "fingerprint": null,
           "directory": "https://fixture.test/files/",
-          "stem": "new",
+          "stem": "report",
           "is_real_file": true
         },
         {
@@ -1514,7 +1846,7 @@
           "entry_index": null,
           "fingerprint": null,
           "directory": "https://fixture.test/files/",
-          "stem": "x",
+          "stem": "report",
           "is_real_file": true
         }
       ],
@@ -1568,7 +1900,7 @@
           "entry_index": 0,
           "fingerprint": null,
           "directory": "https://fixture.test/files/",
-          "stem": "a",
+          "stem": "report",
           "is_real_file": true
         },
         {
@@ -1580,7 +1912,7 @@
           "entry_index": 1,
           "fingerprint": null,
           "directory": "https://fixture.test/files/",
-          "stem": "b",
+          "stem": "report",
           "is_real_file": true
         },
         {
@@ -1592,7 +1924,7 @@
           "entry_index": null,
           "fingerprint": null,
           "directory": "https://fixture.test/files/",
-          "stem": "x",
+          "stem": "report",
           "is_real_file": true
         }
       ],
@@ -1646,7 +1978,7 @@
           "entry_index": null,
           "fingerprint": null,
           "directory": "https://fixture.test/files/",
-          "stem": "zip",
+          "stem": "CHRG-1",
           "is_real_file": true
         },
         {
@@ -1658,7 +1990,7 @@
           "entry_index": null,
           "fingerprint": null,
           "directory": "https://fixture.test/files/",
-          "stem": "pdf",
+          "stem": "CHRG-1",
           "is_real_file": true
         },
         {
@@ -1670,7 +2002,7 @@
           "entry_index": null,
           "fingerprint": null,
           "directory": "https://fixture.test/files/",
-          "stem": "html",
+          "stem": "CHRG-1",
           "is_real_file": true
         },
         {
@@ -1775,7 +2107,7 @@
           "entry_index": null,
           "fingerprint": null,
           "directory": "https://fixture.test/files/",
-          "stem": "zip",
+          "stem": "CHRG-1",
           "is_real_file": true
         },
         {
@@ -1787,7 +2119,7 @@
           "entry_index": null,
           "fingerprint": null,
           "directory": "https://fixture.test/files/",
-          "stem": "a",
+          "stem": "CHRG-1",
           "is_real_file": true
         },
         {
@@ -1799,7 +2131,7 @@
           "entry_index": null,
           "fingerprint": null,
           "directory": "https://fixture.test/files/",
-          "stem": "b",
+          "stem": "CHRG-1-err",
           "is_real_file": true
         }
       ],
@@ -1850,7 +2182,7 @@
           "entry_index": null,
           "fingerprint": null,
           "directory": "https://fixture.test/files/",
-          "stem": "a",
+          "stem": "statement",
           "is_real_file": true
         },
         {
@@ -1862,7 +2194,7 @@
           "entry_index": null,
           "fingerprint": null,
           "directory": "https://fixture.test/files/",
-          "stem": "b",
+          "stem": "statement",
           "is_real_file": true
         }
       ],
@@ -1969,7 +2301,7 @@
           "entry_index": null,
           "fingerprint": null,
           "directory": "https://fixture.test/files/",
-          "stem": "x",
+          "stem": "a",
           "is_real_file": true
         }
       ],
@@ -2015,7 +2347,7 @@
           "entry_index": null,
           "fingerprint": null,
           "directory": "https://fixture.test/files/",
-          "stem": "p",
+          "stem": "report",
           "is_real_file": true
         },
         {
@@ -2027,7 +2359,7 @@
           "entry_index": null,
           "fingerprint": null,
           "directory": "https://fixture.test/files/",
-          "stem": "x",
+          "stem": "report",
           "is_real_file": true
         }
       ],
@@ -2286,7 +2618,7 @@
           "entry_index": null,
           "fingerprint": "A",
           "directory": "https://fixture.test/c/",
-          "stem": "c",
+          "stem": "report",
           "is_real_file": true
         },
         {
@@ -2310,7 +2642,7 @@
           "entry_index": null,
           "fingerprint": "A",
           "directory": "https://fixture.test/e/",
-          "stem": "e",
+          "stem": "report",
           "is_real_file": true
         },
         {
@@ -2322,7 +2654,7 @@
           "entry_index": null,
           "fingerprint": null,
           "directory": "https://fixture.test/z/",
-          "stem": "z",
+          "stem": "report",
           "is_real_file": true
         }
       ],
@@ -2421,6 +2753,352 @@
           ]
         ]
       }
+    },
+    {
+      "id": "listing-page-beside-several-pdfs",
+      "files": [
+        {
+          "source_id": "listing",
+          "body_sha": "listing",
+          "format": "html",
+          "context_url": "https://fixture.test/listing",
+          "member_path": null,
+          "entry_index": null,
+          "fingerprint": null,
+          "directory": "https://fixture.test/events/",
+          "stem": "default",
+          "is_real_file": true
+        },
+        {
+          "source_id": "june",
+          "body_sha": "june",
+          "format": "pdf",
+          "context_url": "https://fixture.test/june",
+          "member_path": null,
+          "entry_index": null,
+          "fingerprint": null,
+          "directory": "https://fixture.test/meetings/20260604/",
+          "stem": "HHRG-119-BA00-20260604-SD002",
+          "is_real_file": true
+        },
+        {
+          "source_id": "july",
+          "body_sha": "july",
+          "format": "pdf",
+          "context_url": "https://fixture.test/july",
+          "member_path": null,
+          "entry_index": null,
+          "fingerprint": null,
+          "directory": "https://fixture.test/meetings/20260714/",
+          "stem": "HHRG-119-BA00-20260714-SD002",
+          "is_real_file": true
+        },
+        {
+          "source_id": "september",
+          "body_sha": "september",
+          "format": "pdf",
+          "context_url": "https://fixture.test/september",
+          "member_path": null,
+          "entry_index": null,
+          "fingerprint": null,
+          "directory": "https://fixture.test/uploadedfiles/",
+          "stem": "hhrg-119-ba00-20260902-sd002",
+          "is_real_file": true
+        }
+      ],
+      "expected": {
+        "components": [
+          [
+            "listing"
+          ],
+          [
+            "june"
+          ],
+          [
+            "july"
+          ],
+          [
+            "september"
+          ]
+        ],
+        "rendition_groups": []
+      },
+      "publisher_links": [
+        {
+          "source_id": "june",
+          "page_body": "page-event-1",
+          "context": "https://fixture.test/events/event-1",
+          "group_path": "html[1]/body[1]/table[1]/tr[2]"
+        },
+        {
+          "source_id": "listing",
+          "page_body": "page-event-1",
+          "context": "https://fixture.test/events/event-1",
+          "group_path": "html[1]/body[1]/table[1]/tr[2]"
+        },
+        {
+          "source_id": "july",
+          "page_body": "page-event-2",
+          "context": "https://fixture.test/events/event-2",
+          "group_path": "html[1]/body[1]/table[1]/tr[2]"
+        },
+        {
+          "source_id": "listing",
+          "page_body": "page-event-2",
+          "context": "https://fixture.test/events/event-2",
+          "group_path": "html[1]/body[1]/table[1]/tr[2]"
+        },
+        {
+          "source_id": "september",
+          "page_body": "page-event-3",
+          "context": "https://fixture.test/events/event-3",
+          "group_path": "html[1]/body[1]/table[1]/tr[2]"
+        },
+        {
+          "source_id": "listing",
+          "page_body": "page-event-3",
+          "context": "https://fixture.test/events/event-3",
+          "group_path": "html[1]/body[1]/table[1]/tr[2]"
+        }
+      ]
+    },
+    {
+      "id": "press-release-beside-one-pdf",
+      "files": [
+        {
+          "source_id": "release",
+          "body_sha": "release",
+          "format": "html",
+          "context_url": "https://fixture.test/release",
+          "member_path": null,
+          "entry_index": null,
+          "fingerprint": null,
+          "directory": "https://fixture.test/news/",
+          "stem": "documentsingle",
+          "is_real_file": true
+        },
+        {
+          "source_id": "testimony",
+          "body_sha": "testimony",
+          "format": "pdf",
+          "context_url": "https://fixture.test/testimony",
+          "member_path": null,
+          "entry_index": null,
+          "fingerprint": null,
+          "directory": "https://fixture.test/uploadedfiles/",
+          "stem": "testimony_secretary_06.04.2026",
+          "is_real_file": true
+        }
+      ],
+      "expected": {
+        "components": [
+          [
+            "release"
+          ],
+          [
+            "testimony"
+          ]
+        ],
+        "rendition_groups": []
+      },
+      "publisher_links": [
+        {
+          "source_id": "testimony",
+          "page_body": "page-event-1",
+          "context": "https://fixture.test/events/event-1",
+          "group_path": "html[1]/body[1]/table[1]/tr[2]"
+        },
+        {
+          "source_id": "release",
+          "page_body": "page-event-1",
+          "context": "https://fixture.test/events/event-1",
+          "group_path": "html[1]/body[1]/table[1]/tr[2]"
+        }
+      ]
+    },
+    {
+      "id": "presentation-beside-a-testimony",
+      "files": [
+        {
+          "source_id": "slides",
+          "body_sha": "slides",
+          "format": "docx",
+          "context_url": "https://fixture.test/slides",
+          "member_path": null,
+          "entry_index": null,
+          "fingerprint": null,
+          "directory": "https://fixture.test/uploadedfiles/",
+          "stem": "Appropriations Material 3.12.24",
+          "is_real_file": true
+        },
+        {
+          "source_id": "testimony",
+          "body_sha": "testimony",
+          "format": "pdf",
+          "context_url": "https://fixture.test/testimony",
+          "member_path": null,
+          "entry_index": null,
+          "fingerprint": null,
+          "directory": "https://fixture.test/uploadedfiles/",
+          "stem": "Testimony_Witness 03.20.24",
+          "is_real_file": true
+        }
+      ],
+      "expected": {
+        "components": [
+          [
+            "slides"
+          ],
+          [
+            "testimony"
+          ]
+        ],
+        "rendition_groups": []
+      },
+      "publisher_links": [
+        {
+          "source_id": "testimony",
+          "page_body": "page-hearing",
+          "context": "https://fixture.test/events/hearing",
+          "group_path": "html[1]/body[1]/ul[1]/li[1]"
+        },
+        {
+          "source_id": "slides",
+          "page_body": "page-hearing",
+          "context": "https://fixture.test/events/hearing",
+          "group_path": "html[1]/body[1]/ul[1]/li[1]"
+        }
+      ]
+    },
+    {
+      "id": "html-and-pdf-of-one-name-join",
+      "files": [
+        {
+          "source_id": "text",
+          "body_sha": "text",
+          "format": "html",
+          "context_url": "https://fixture.test/text",
+          "member_path": null,
+          "entry_index": null,
+          "fingerprint": null,
+          "directory": "https://fixture.test/117/bills/hr5376/generated/",
+          "stem": "BILLS-117hr5376eas",
+          "is_real_file": true
+        },
+        {
+          "source_id": "print",
+          "body_sha": "print",
+          "format": "pdf",
+          "context_url": "https://fixture.test/print",
+          "member_path": null,
+          "entry_index": null,
+          "fingerprint": null,
+          "directory": "https://fixture.test/117/bills/hr5376/",
+          "stem": "BILLS-117hr5376eas",
+          "is_real_file": true
+        }
+      ],
+      "expected": {
+        "components": [
+          [
+            "text",
+            "print"
+          ]
+        ]
+      },
+      "publisher_links": [
+        {
+          "source_id": "print",
+          "page_body": "page-floor",
+          "context": "https://fixture.test/events/floor",
+          "group_path": "html[1]/body[1]/table[1]/tr[1]"
+        },
+        {
+          "source_id": "text",
+          "page_body": "page-floor",
+          "context": "https://fixture.test/events/floor",
+          "group_path": "html[1]/body[1]/table[1]/tr[1]"
+        }
+      ]
+    },
+    {
+      "id": "same-bytes-copies-merge-beside-a-listing-page",
+      "files": [
+        {
+          "source_id": "listing",
+          "body_sha": "listing",
+          "format": "html",
+          "context_url": "https://fixture.test/listing",
+          "member_path": null,
+          "entry_index": null,
+          "fingerprint": null,
+          "directory": "https://fixture.test/events/",
+          "stem": "default",
+          "is_real_file": true
+        },
+        {
+          "source_id": "repository",
+          "body_sha": "statement",
+          "format": "pdf",
+          "context_url": "https://fixture.test/repository",
+          "member_path": null,
+          "entry_index": null,
+          "fingerprint": null,
+          "directory": "https://fixture.test/meetings/20260902/",
+          "stem": "HHRG-119-BA00-20260902-SD002",
+          "is_real_file": true
+        },
+        {
+          "source_id": "committee",
+          "body_sha": "statement",
+          "format": "pdf",
+          "context_url": "https://fixture.test/committee",
+          "member_path": null,
+          "entry_index": null,
+          "fingerprint": null,
+          "directory": "https://fixture.test/uploadedfiles/",
+          "stem": "hhrg-119-ba00-20260902-sd002",
+          "is_real_file": true
+        }
+      ],
+      "expected": {
+        "components": [
+          [
+            "listing"
+          ],
+          [
+            "repository",
+            "committee"
+          ]
+        ],
+        "rendition_groups": []
+      },
+      "publisher_links": [
+        {
+          "source_id": "repository",
+          "page_body": "page-event-1",
+          "context": "https://fixture.test/events/event-1",
+          "group_path": "html[1]/body[1]/table[1]/tr[2]"
+        },
+        {
+          "source_id": "listing",
+          "page_body": "page-event-1",
+          "context": "https://fixture.test/events/event-1",
+          "group_path": "html[1]/body[1]/table[1]/tr[2]"
+        },
+        {
+          "source_id": "committee",
+          "page_body": "page-event-2",
+          "context": "https://fixture.test/events/event-2",
+          "group_path": "html[1]/body[1]/table[1]/tr[2]"
+        },
+        {
+          "source_id": "listing",
+          "page_body": "page-event-2",
+          "context": "https://fixture.test/events/event-2",
+          "group_path": "html[1]/body[1]/table[1]/tr[2]"
+        }
+      ]
     }
   ],
   "links": [

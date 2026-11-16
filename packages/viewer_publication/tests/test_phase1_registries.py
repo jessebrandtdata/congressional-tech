@@ -28,6 +28,8 @@ def test_phase1_registry_samples_run_through_native_policy_relations(tmp_path):
       dict(name='page-signals',sql="""SELECT c.id,regexp_like(c.value,r.pattern) AS actual_bool,r.number AS actual_number
         FROM cases c JOIN page_signals r ON c.entry=r.id
         WHERE c.registry='page-signals' ORDER BY c.id"""),
+      dict(name='title-rules',sql="""SELECT c.id,regexp_like(c.value,r.pattern) AS actual
+        FROM cases c JOIN title_rules r ON c.entry=r.id WHERE c.registry='title-rules' ORDER BY c.id"""),
       dict(name='formats',sql="SELECT c.id,r.rank AS actual FROM cases c JOIN formats r ON c.entry=r.id WHERE c.registry='formats' ORDER BY c.id"),
       dict(name='publisher-kinds',sql="""SELECT c.id,min(r.document_kind) AS actual FROM cases c
         LEFT JOIN publisher_kinds r ON (c.entry IS NULL OR c.entry=r.id) AND regexp_like(c.value,r.pattern)
@@ -54,7 +56,7 @@ def test_phase1_registry_samples_run_through_native_policy_relations(tmp_path):
     result=run_job(tmp_path,NativeDatasets.from_config(os.environ['DOCSPEC_JOB_CONFIG']),
         inputs=inputs,steps=steps,outputs=[],queries=queries)
     seen=set()
-    for registry in ['file-shapes','page-signals','formats','publisher-kinds','display-facts','committee-codes','recheck-intervals','archive-layouts']:
+    for registry in ['file-shapes','page-signals','title-rules','formats','publisher-kinds','display-facts','committee-codes','recheck-intervals','archive-layouts']:
         for row in result[registry]:
             case=expected[row['id']];seen.add(row['id'])
             value=(row['actual_number'] if type(case['expected']) is int else row['actual_bool']) if registry=='page-signals' else row['actual']
@@ -69,7 +71,7 @@ def test_every_seed_entry_has_a_separate_sample_with_its_evidence():
     cases=json.loads((ROOT/'model/fixtures/registry-samples.json').read_text())['cases']
     by_id={x['id']:x for x in cases}
     assert len(by_id)==len(cases)
-    for name in ['file-shapes','page-signals','formats','publisher-kinds','display-facts','committee-codes','recheck-intervals','archive-layouts']:
+    for name in ['file-shapes','page-signals','title-rules','formats','publisher-kinds','display-facts','committee-codes','recheck-intervals','archive-layouts']:
         rows=json.loads((ROOT/'model/registries'/(name+'.json')).read_text())
         assert len({x['id'] for x in rows})==len(rows)
         assert name.replace('-','_') in REGISTRIES
@@ -77,3 +79,42 @@ def test_every_seed_entry_has_a_separate_sample_with_its_evidence():
             sample=by_id[row['sample_id']]
             assert sample['entry']==row['id'] and sample['registry']==name and sample['source']
             assert not sample['source'].startswith('Authored boundary')
+
+
+def test_recording_sources_resolves_malformed_youtube_embeds(tmp_path):
+    """ct-6qgg: all seven malformed democrats-veterans embeds resolve through native recording_url_sources SQL."""
+    from viewer_publication.archive_model import registry_inputs
+
+    malformed = [
+        ('https://www.youtube.com/embed/FySkoDtoxp8&list=PLnvOLdmKre5zdH1_72pvAsVptGY8d4Nbk?rel=0&wmode=opaque', 'youtube:FySkoDtoxp8'),
+        ('https://www.youtube.com/embed/YzFFXeDonIg&t=346s?rel=0&wmode=opaque', 'youtube:YzFFXeDonIg'),
+        ('https://www.youtube.com/embed/jJj2qoIj-sc&list=PLnvOLdmKre5zdH1_72pvAsVptGY8d4Nbk&index=2?rel=0&wmode=opaque', 'youtube:jJj2qoIj-sc'),
+        ('https://www.youtube.com/embed/https://youtube.com/live/VCiH6kOEEEk?feature=share?rel=0&wmode=opaque', 'youtube:VCiH6kOEEEk'),
+        ('https://www.youtube.com/embed/3v8I_Oxrwv8&list=PLnvOLdmKre5yMctfJ949ckoHz9BJ88h7f?rel=0&wmode=opaque', 'youtube:3v8I_Oxrwv8'),
+        ('https://www.youtube.com/embed/xtkwFNmQuUc&t=214s?rel=0&wmode=opaque', 'youtube:xtkwFNmQuUc'),
+        ('https://www.youtube.com/embed/UnAZvMF-b3g&list=PLnvOLdmKre5zdH1_72pvAsVptGY8d4Nbk?rel=0&wmode=opaque', 'youtube:UnAZvMF-b3g'),
+    ]
+    rejected = [
+        'https://www.youtube.com/embed/1bxY6pFimYg021424?rel=0&wmode=opaque',
+        'https://www.youtube.com/@VetAffairsDems',
+    ]
+    inputs = registry_inputs(tmp_path / 'registries')
+    inputs.append(json_input(tmp_path, 'recording_link_candidates',
+        [dict(page_body=f'{i:064x}', target_url=u) for i, (u, _) in enumerate(malformed)]
+        + [dict(page_body=f'{100 + i:064x}', target_url=u) for i, u in enumerate(rejected)],
+        page_body='Utf8', target_url='Utf8'))
+    steps = [
+        dict(name='recording_url_sources',
+             sql="SELECT id,pattern,key_template,format,default_language,default_production FROM recording_sources WHERE kind='video_url'",
+             materialize=True),
+        dict(name='recording_video_links', sql="""SELECT DISTINCT l.target_url,
+            regexp_replace((regexp_match(l.target_url,rs.pattern))[1],'^(.+)$',rs.key_template) AS extracted_key
+            FROM recording_url_sources rs JOIN recording_link_candidates l ON regexp_like(l.target_url,rs.pattern)""",
+             materialize=True),
+    ]
+    res = run_job(tmp_path / 'job', NativeDatasets.from_config(os.environ['DOCSPEC_JOB_CONFIG']),
+        inputs=inputs, steps=steps, outputs=[],
+        queries=[dict(name='links', sql='SELECT target_url,extracted_key FROM recording_video_links ORDER BY target_url')])
+    actual = {r['target_url']: r['extracted_key'] for r in res['links']}
+    assert actual == dict(malformed)
+

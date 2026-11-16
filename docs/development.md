@@ -98,7 +98,280 @@ syncs the lock, prepares the historical object and runs doctor/inventory. The
 devcontainer uses the same sync and checks. Native lane success still requires
 reviewing pytest's reported skips.
 
+## One engine query, no job file
+
+`query` runs one statement through the pinned engine on the local runtime above,
+so a check or a proof is written in the model's own SQL dialect, not DuckDB's:
+
+```bash
+# cited.sha holds the binary hashes: a plain key on both sides, and the small side first (it builds).
+python scripts/dev.py query --table cited=cited.parquet --table captures=<candidate>/archive-model/evidence/capture_evidence.parquet \
+  "SELECT k.sha, c.receipt_key FROM cited k JOIN captures c ON c.sha256 = k.sha"
+python scripts/dev.py query --file model/sql/<file>.sql --table <relation>=<file>.parquet --explain
+```
+
+Each `--table NAME=PATH` binds a Parquet file, or the exact table pin a `.json`
+file holds (`metadata_location`, `table_uuid`, `snapshot`, `schema_id`). Only a pin
+on this machine binds: a production lake pin is on the object store and needs the
+remote runtime and its credentials, which `query` refuses to open. `--explain`
+prints the logical and physical plans and runs nothing; `--explain --analyze`
+runs the statement and prints the plan with what each operator did. Rows print
+tab-separated in the statement's column order, `NULL` for null, binary as
+lowercase hex; `--json` prints the rows as JSON. Name every column once: the
+engine returns each row as a map and keeps only the last of two columns of one
+name (ct-pyai), so `SELECT k.sha, c.sha` or `SELECT *` over a join is refused.
+The engine gets 2 GiB of memory (`--memory-gib`) and 2 GiB of scratch, never more
+than the runtime allows. A result must fit the runtime's `max_metadata_bytes`,
+and the engine charges it to memory at many times its JSON size (a 2 MiB result
+needed over 32 MB), so ask for counts or narrow columns. The client stops a query
+after the runtime's `timeout_seconds`, 120 s unless the runtime file sets it.
+Nothing is written: the job has no steps or outputs, and the engine plans no DDL
+or DML in a query. The job folder is temporary and removed on exit or TERM;
+`--work DIR` (new or empty) keeps `job.json`, `engine.log` and, when a limit was
+lowered, `limits.json`.
+From Python, `congress_api.retention.provenance.query(engine, sql, tables)`,
+`query_result` (column names too) and `explain(...)` do the same with any engine.
+Large inputs still run under the watchdog (AGENTS.md).
+
+An engine failure (`DocSpecFailure`) starts with the engine's refusal code, then
+the statement where the engine names it, then the cause. The code alone does not
+mark a memory refusal on either engine, the pinned b0342a7 or the one line ae12bbd:
+their `src/error.rs` gives every DataFusion error the code `query` unless an engine
+refusal is among its causes. So DataFusion's own memory pool refuses with `query`
+and "Resources exhausted: Failed to allocate"; the engine's budget refuses with
+`capacity` and "shared memory budget exhausted" or "allocation exceeds admission
+granularity" (after "External error: capacity: " when an operator passes it on);
+and `capacity` also names a limit that is not memory, "blocking I/O capacity
+exhausted". Code that must tell a memory refusal apart reads the text for those
+phrases, as `test_the_memory_limit_reaches_the_engine` in
+`packages/congress_api/tests/test_provenance_job.py` does.
+
+## One model-only build against a release
+
+To prove a model or engine change on a release's exact inputs, with no publish,
+pointer or upload, fetch the spicy-regs tables the model pins, bind this checkout's
+model to a completed candidate (plan mode: it checks every pinned input file in
+seconds and names each one missing or changed), then run the bound spec under the
+watchdog (about 10 GiB and 10 minutes on the full lake):
+
+```bash
+.venv/bin/python -I -m viewer_publication.spicy_regs_inputs --model-spec model/jobs/publish-model.json
+.venv/bin/python -I -m viewer_publication.archive_model_job --from-candidate <candidate> --build <fresh folder> \
+  --runtime <runtime.json>
+python3 scripts/archive_watchdog.py --rss-gb 14 --expect-gb 10.1 --start-available-gb 6 --interval 0.2 -- \
+  .venv/bin/python -I -m viewer_publication.archive_model_job --spec <fresh folder>/model-spec.json --execute \
+  --ledger <candidate>/archive-publish/ledger --expect-release-id <release id>
+```
+
+It binds the candidate's daily pins and provenance as the publisher does and
+passes the retired-link ledger, so a build of unchanged code reproduces the
+release id. A missing input found only after the watchdog has admitted the build
+costs the admission wait (24 minutes once), so plan first. The release id does not cover the evidence files: compare those
+too. The build folder is kept (about 1.6 GiB); delete it when its result is recorded.
+Its result line's `engine_runtime` (also printed before the build, as a
+`[docspec-runtime]` line on stderr) names the runtime file, binary and limits it ran under,
+each with its sha256, and the limits' values; the publisher seals the same record
+into `archive-publish/model-intent.json` and `completed-model.json`, so two arms
+can be checked for the same limits. It cannot see limits a job narrows from that
+runtime (`provenance.bounded_engine`, as capture staging and queries do), a later
+change to the limits file (nothing re-checks it during a run), or the values the
+engine actually applies.
+
 ## Reading version changes
+
+For bounded text-quality investigations, `lake.body_text.stage` and
+`lake.body_text.run` accept `retain_quality_evidence=True`. Each worker attempt
+writes its own JSONL file beside the batch diagnostics; retries preserve earlier
+attempts. The file records source and parser identity, page starts, extracted
+text before cleanup, observation geometry and routing reasons, the existing GPO
+cleanup record, retained-text hashes, and the derivation outcome. Raster bytes
+are excluded. A worker returns a small file reference rather than putting this
+evidence in its control response. Evidence for completed pages survives a later
+page failure, and the batch receipt names those files after staged text cleanup.
+
+Retention is opt-in until its storage cost is qualified on the intended inputs.
+It changes neither the text nor the reading status. The JSONL schema has its own
+identity (`ct-body-text-quality-v1`); it supplies diagnostic observations, not a
+claim that a completed reading contains every visible word. A cleanup-policy
+change still needs a distinct reading meaning and affected-scope proof before
+old rows can be replaced or reused under that meaning.
+
+The November 2026 diagnostic-retention change keeps the existing reading
+versions. Review found that the default path changes no extraction, cleanup,
+routing, limits or status decisions. All fixed reader-fixture hashes remain
+unchanged. A bounded original-backed worker comparison on S017, S055 and S150
+also preserves the complete reading, text hash, page offsets and OCR identity
+with retention enabled; a fresh S138 OCR attempt verifies actual recognizer
+evidence serialization. The 43 focused derivation/producer checks include
+failed-page retention, interrupted attempts, distinct retry files and a real
+committed batch. This establishes diagnostic equivalence on those cases, not
+corpus-wide quality or storage capacity. The refreshed source fingerprints in
+`model/reading-version-diagnostics.json` record that decision. The separate
+cleanup repair deliberately changes text and needs its own reading version.
+
+The later geometry-diagnostic correction also keeps these declarations. When
+an explicitly allowed native-geometry fallback succeeds, CT now retains the
+shared reader's offending line, displayed bounds, page number and page geometry
+in `native_geometry_details`. These facts previously survived an unrecovered
+page failure but were lost after fallback. The source-backed c848 page-one
+probe uses a scripted backend and preserves the complete reading with evidence
+off and on; it now retains the zero-width `TX ` line and its original coordinates.
+All fixed reader-fixture hashes and declared versions remain unchanged; only
+the source fingerprints move. The focused regression also excludes unrelated
+opaque raw objects. Evidence and independent direct review are under
+`repairs/geometry-reconciliation-20261113/` in the main recovery evidence root.
+This diagnostic equivalence does not qualify the scripted text or enable OCR.
+
+The 2026-11-15 raw-range diagnostic change also retains the reading versions.
+`raw_range_ValueError` still leaves the body pending and writes no reading or
+text row. Its optional `raw_read_diagnostic` records a bounded failure phase
+and reason, expected and observed byte counts, HTTP status, and range/ETag
+checks. Unknown values remain null; keys, URLs, ETag strings and exception text
+are excluded. Other error categories, read bounds, cache admission and retry
+rules remain unchanged. Native stage tests and spawned workers against a local
+HTTP server cover metadata/range mismatches, short payloads and unknown
+`ValueError` failures; only their successful controls are committed. A planted
+secret is absent from serialized replies and retained outcomes. All fixed
+reader-fixture digests match. The updated source fingerprints record this
+bounded diagnostic equivalence, not the cause of any historical failure or
+qualification of unread source text.
+
+The later 2026-11-15 full-object range fix accepts HTTP 200 only when the
+pinned request starts at zero and covers the complete expected object.
+Content-Length and ETag must match before reading, and the bounded response
+body must have exactly the expected length. A nonempty Content-Range on 200
+is refused, including an apparently matching range. Every partial request
+still requires 206 and an exact Content-Range. This accommodates origins
+that ignore Range, as allowed by [RFC 9110 section 14.2](https://www.rfc-editor.org/rfc/rfc9110.html#section-14.2);
+Content-Range has no defined response meaning for 200
+([section 14.4](https://www.rfc-editor.org/rfc/rfc9110.html#section-14.4)).
+The exact smallest pending object's live diagnostic confirmed a 200 response
+with matching length and ETag, rejected before reading the body. That proves
+this live failure path, not the causes of the other historical failures.
+Tiny local HTTP checks exercise the real read-once cache, public-origin
+adapter and completed-text consumer; malformed identity/length, partial-200,
+and short/extra-body controls remain refusals. All ten reader declarations,
+fixture digests and diagnostic snapshots are unchanged: this changes raw
+transport acceptance, not text interpretation. The large repaired transfer
+has a separate bounded pilot: one request retrieved all 541,845,812 stored
+bytes in 14.2 seconds at 0.637 GiB peak RSS, then a bounded local decode
+verified the 575,953,191-byte PDF and expected body SHA. That live response
+was 206; HTTP 200 acceptance remains covered by the local consumer controls.
+
+The 2026-11-15 optional geometry-error compatibility change also preserves
+declared reading versions. Error accounting discovers `NativeGeometryError`
+only when the installed shared reader exports that type. A maintained reader
+that reports the general `ExtractionError` therefore keeps its original page
+failure instead of losing it to an import error. Typed and untyped failure
+controls pass, and all ten fixed fixture digests and declared versions remain
+identical. Only the PDF/HTML/XML workspace fingerprints move. This is an
+equivalence decision for the installed reader and fixed fixtures, not a claim
+that every shared-reader version or historical source produces identical text.
+The geometry recovery's separately versioned text remains governed by its
+retained source, reader policy, page evidence and accepted selection.
+
+The isolated cleanup integration candidate pins the reproducible vendored wheel
+`spicy-docs==0.85.0+gpo.20261113`. Its receipt names the exact source commit and
+both changed package members. PDF readings declare the corrected cleanup and
+page-routing meaning; composed WARC readings name that new PDF rule. HTML/XML
+declarations remain the same, and their fixed fixtures replay unchanged.
+The PDF fixture now retains the ambiguous `LEN` and `VACREP180 with DISTILLER`
+printing labels. Its changed fingerprint is intentional, as with the retained
+`WILDA` and `JACKIE` controls: those labels are not recovered substantive text.
+
+The bounded consumer qualification reads archived originals through the installed
+wheel and actual CT workers, commits to a private native catalog, and reads back
+text, source/version identity, hashes, offsets and OCR provenance. Its page
+strings equal the independently source-reviewed candidate outputs. This proves
+the consumer uses the repair; it does not prove that historical readings outside
+that cohort are unchanged. Corpus exposure and selective compatibility remain
+required before production cutover. No historical readings are restamped by this
+candidate, and the paused recovery keeps its original source and dependency pins.
+
+The subsequent markup candidate pins `spicy-docs==0.85.0+markup.20261113`, built
+from `ce38a3db` on the retained GPO base. Its receipt verifies every wheel member
+against that source and two byte-identical builds. It normalizes ordinary HTML
+around local preformatted blocks and qualifies legislative XML by the native
+bill DTD or GPO USLM namespace. Generic XML keeps all fields and metadata;
+foreign and unknown fields keep boundaries. Raw reconstruction evidence retains
+its source whitespace and byte spans.
+
+HTML/XML and their composed WARC declarations deliberately change. PDF's
+declaration stays unchanged: its extraction function is AST-identical, the GPO
+cleanup module is byte-identical, and the retained native cover reproduces text,
+offsets and cleanup records. The six retained markup controls include two
+unchanged GovInfo preformatted bodies and four intended prose/metadata changes.
+The small local sample does not establish corpus throughput or qualify the
+complete non-OCR cohort. Existing readings remain retained; ct-cbkz owns that
+measured reparse and selection work. OCR stays paused and refetch stays deferred.
+
+The composed offline recovery candidate now pins
+`spicy-docs==0.85.0+ctreaders.20261113.2`, source commit
+`cc5baaca34e5da24d35040611da4e26bcd3a936c`. Its vendored receipt verifies the
+source and reproducible wheel. HTML/XML and composed WARC declarations change
+for explicit encoding evidence, empty internal DTD compatibility, qualified
+House amendment cleanup and inline punctuation. Markup readings also retain the
+original digest, encoding decision and cleanup record. Existing readings remain
+retained; this change does not select the repaired historical cohort.
+
+The PDF declaration stays unchanged. Exact-page overrides are opt-in and bind
+source, page and replacement identity; they do not change default extraction.
+Request memory samples no longer inherit a previous request's lifetime peak.
+Native geometry diagnostics now distinguish `zero_area` and `outside_page`,
+while persisted failures retain the established `ExtractionError` family. A
+direct comparison of the retained c848 failure confirms every persisted field
+matches; diagnostics retain the precise cause. Native/scripted checkpoint
+fixtures prove resume mechanics, not real recognition quality. The fixed PDF
+sample and existing generic page-reader samples also remain unchanged. These
+bounded checks support the unchanged declarations, not whole-corpus equivalence.
+
+The filename producer also hashes the worker source. Its fingerprint
+`43a8bbff5938d1d880f5d599e0d53ce06978e57c963917c1eac83b044ed70295`
+maps explicitly to the existing catalog version `e6e2699343ebae7fd149702114d58360a3bd62a7331d19db58215edc042aba70`.
+The filename parser package, inputs, schema and imported dependency versions are
+unchanged. RSS sampling records per-request measurements, while buffered-result,
+output-limit, timeout and memory-refusal precedence remain as before. A native
+three-filename replay using the original and current worker preserves the actual
+worker and staged rows for the introduced/reported H.R. 535 versions and House
+Print 52431. Independent direct review and focused worker/failure checks support
+this exact equivalence decision. Evidence is under the feed repair directory's
+`filename-compatibility/`; this does not establish new filename quality or
+requalify old source content.
+
+The new `house_floor_feed` declaration reads retained House Atom feeds as
+structured discovery observations. It has its own 64 MiB decoded bound; ordinary
+page readers keep their 24 MiB bound. The model preserves each entry/link
+occurrence and uses successful feed readings instead of duplicate flattened
+generic links. The explicit `lake.readings.stage`/`run` parser is available for
+bounded offline work. It is not enabled in the daily job: that path currently
+supports only the qualified HTML metadata scope. Adding an optional reader does
+not invalidate the existing daily baseline. See [House feed reader](house-floor-feed.md).
+
+An XML recovery candidate is a separate inspection artifact, never an accepted
+reading. `python -m congress_api.retention.markup_repair --input ORIGINAL
+--sha256 SHA256 --output-dir FRESH_DIRECTORY` preserves original and candidate
+bytes, diagnostics, ordered events and text. Altered candidates remain partial
+and unqualified even if their XML is well formed. A missing ending is a source
+gap; closing tags cannot recover its words. See the exact per-ticket direct
+reviews in the retained `coordination/ocr-offline-ticket-matrix-20261113.md`.
+
+The shared quality backport pins `spicy-docs==0.85.0+sourcequality.20261115`,
+source `c7d6ded0ff246dad7737c82fe9760e190e456e6a`. Its wheel receipt verifies
+reproducible bytes and every package member: it adds shared response-role and
+text-measurement modules and extends the shared PDF-byte and error-page helpers.
+Existing extraction, markup, OCR and recovery members remain byte-identical to
+the prior CT wheel. CT imports the shared measurements and retains its qualified
+HTML/XML response policy alias; the new PDF observations have a separate version.
+
+The maintainer retains all reading versions. Exact replay preserves the roles,
+reasons and evidence of 411 retained HTML/XML bodies and the five existing
+quality-consumer cases. Every reading fixture digest and declared version
+matches the pre-change snapshot. Only the locked SpicyDocs identity and its
+reported package version change in `model/reading-version-diagnostics.json`.
+The retained receipt directory is
+`<main checkout>/.cache/archive-release/ocr-recovery-20261113/repairs/shared-source-quality-20261115/`.
+This bounded equivalence decision reuses earlier manual source reviews; it
+does not certify unread corpus content or trigger recomputation.
 
 The lake keys reading rows by body digest, parser, and the declared version in
 `congress_api.lake.reading_versions`. The combined unreadable-decision version
@@ -108,9 +381,33 @@ also depends on the four leaf versions and the combined worker limits.
 `doctor` and the shared CI setup compare source, locked package, tool, and
 worker policy evidence with `model/reading-version-diagnostics.json`.
 A warning reports the result of a fixed fixture and leaves saved rows eligible.
-The import check follows static imports,
-including function-local imports, and may conservatively include shared code.
-Dynamic imports and externally supplied inputs need separate review.
+Source evidence covers only the code a reader runs to turn a body into text
+(`READERS` in `congress_api.lake.reading_version_diagnostics`, ct-r91j):
+- each entry's reader modules are walked through their static imports,
+  function-local ones included;
+- the dispatcher and producer files it runs are hashed by their bytes only:
+  `readings.py`, `parser_worker.py` and `process_resources.py` for every entry,
+  `lake/body_text.py` for body text, and `compatible_versions.py` for the bundle;
+- the walk stops at `retention/weekly_tables.py`, plumbing that the `retention`
+  package re-exports, and does not hash it.
+
+A test runs each reader's worker callable over its fixture bodies and fails when
+a file whose functions ran is missing from that entry's evidence. That guards
+the helpers the bytes-only files call. Outside both the evidence and that test:
+- the remote read path;
+- a helper called only off the fixture paths;
+- a page rule loaded by name from another module;
+- the bundle's version naming (`lake/versions.py`; the IDs are pinned in
+  `publish-daily.json`);
+- locked packages that only unwalked code imports. Locked-package evidence
+  covers the walked modules' imports only, so pyarrow, botocore and other
+  table-I/O and transport packages no longer move it. Producer identities
+  already exclude them;
+- `compatible_versions.py`'s inputs. `model/registries/compatible-versions.json`
+  has each entry validated with its proof when it is loaded; hashing it would warn
+  on every new record. `provenance.json_input` is generic job I/O.
+
+Review those, and any externally supplied input, by hand.
 
 On drift, inspect the change and run the relevant bounded reading fixtures. For
 an original-backed comparison, fix the body keys and local copies in advance.
@@ -131,6 +428,63 @@ unreadable inputs with the release owner before publication. Keep the existing
 sniff compatibility entry and predicate entries until retained-table
 comparisons establish that their selected rows, refusals, and pending work
 are preserved.
+
+The Congress.gov embedded-bill selector (ct-g4yz) is a separate opt-in candidate:
+`markup_text(body, 'html_text', select_publisher_content=True)`. It selects the
+exact original USLM bill bytes only when the page has one canonical Congress.gov
+bill URL and one explicit `xml#billTextUslm.generated-html-container`. SpicyDocs
+reads that fragment as USLM, retaining the complete bill and any in-bill form
+text. Missing or unqualified wrappers use the ordinary complete HTML reader;
+empty or unreadable selected fragments also fall back. Selection evidence gives
+the policy, byte span, fragment digest and outcome, or a fallback reason when
+the marker was present. An ordinary-reader failure remains an error.
+
+The candidate uses `HTML_CONTENT_SELECTION_VERSION`, distinct from ordinary
+`READING_VERSIONS['html_text']`. Default HTML, WARC and reviewed encoding
+recovery keep their existing versions and behavior. No worker, scheduled job or
+selection is activated by this opt-in. Qualify exact affected keys and review
+source, selected fragment and final text before selective adoption; retain the
+previous actual rows. The initial source-backed fixture establishes one complete
+bill. It does not establish corpus-wide eligibility, general article selection,
+or preservation of substantive content outside other publishers' wrappers.
+
+The 2026-11-15 ct-g4yz equivalence decision retains ordinary reader versions:
+selection defaults off, the three ordinary body-text fixture digests match,
+the authentic Congress.gov default reproduces its retained prior text digest,
+and focused HTML, XML, WARC and reviewed-recovery checks pass. The refreshed
+diagnostic changes only the shared source fingerprint. Changed opt-in semantics
+have their own declaration and version; this is not equivalence for selected
+candidate output or a corpus-wide review.
+
+The additional ct-g4yz policy is explicitly requested with
+`select_publisher_content='congress-gov-legislative-wrappers/002'` and uses
+`HTML_LEGISLATIVE_SELECTION_VERSION`. `True` still requests the original policy.
+The new policy recognizes the observed Congress.gov House bill/resolution,
+House joint/concurrent resolution and Senate concurrent resolution canonical
+text paths. It selects one complete visible USLM `bill`/`pLaw`,
+`div.generated-html-container`, or `pre#billTextContainer`. SpicyDocs' index
+reader qualifies the canonical head; its shared events provide exact wrapper
+coordinates without requiring the publisher's generated HTML to close every
+paragraph. The shared XML reader validates the complete USLM root. The existing
+USLM/HTML consumers render these source slices without a new normalizer or
+generic form deletion.
+
+All selected fragments retain source coordinates and hashes. Unqualified,
+ambiguous, incomplete or empty selections use the original full HTML reader;
+candidate staging preserves their existing actual keys. An embedded PDF or
+challenge page does not become recovered legislative text through selection.
+The retained 226-source URL cohort bounds the candidate run; it does not cover
+HTML bodies without source-URL metadata or other publishers. The four complete
+short legislative fixtures and declared contexts from the large preformatted
+bill provide source review, not a manual review of every candidate. Root review
+and explicit selective adoption remain separate from extraction.
+
+The additional 2026-11-15 equivalence decision preserves ordinary HTML, XML,
+PDF, WARC and encoding-recovery versions. Default selection remains off, the
+original embedded-bill meaning remains unchanged, and focused derivation,
+recovery and both selector tests cover those consumers. Only the shared source
+fingerprints change in diagnostics; the new opt-in meaning has its own declared
+version. No active worker, model pin or accepted selection is changed here.
 
 The historical `--old-lock` attestation reconstructs a byte-derived version.
 Run it from the pre-declaration source revision that owns that proof. The
@@ -170,12 +524,20 @@ were committed. A fresh attempt therefore recovers interrupted work without a
 second local journal, and an unchanged rerun does not reopen settled bodies.
 Changing any reading version requires a newly qualified baseline.
 
-The count gate runs before raw custody lookups. The stored-byte gate runs after
-any required exact-key custody HEADs and before derived body reads. Unknown
-stored sizes and either exceeded budget return `derived_budget_required`; this
-does not invoke the scheduler's generic archive backfill. Resolve the scoped
-work or qualify a suitable budget before retrying. Leaf classification retains
-its own existing admission and can precede this derived gate.
+Both budgets select the work before raw custody lookups and body reads. Work
+past either budget is carried, not refused (ct-hiec): the attempt reads the
+bodies of the oldest receipts up to the budget (always at least one) and reports
+the rest as `carried` (bodies, known stored bytes, unknown sizes and the oldest
+receipt day), in the daily report, `daily-summary.json` and the nightly
+`summary.json` (`daily_carried`). The status stays `completed`, so the nightly
+publishes; a carried page shows `unread` main content until a later night reads
+it, since the next attempt's selection still finds it missing. A body whose
+stored size is unknown before custody is admitted only alone. After any
+exact-key custody HEADs, a second byte gate returns `derived_budget_required`
+for a still-unknown size or for more than one admitted body past the byte
+budget; this does not invoke the scheduler's generic archive backfill. Leaf
+classification retains its own existing admission and can precede this derived
+gate.
 
 Qualification must measure the current-versus-baseline narrow SHA scan, parser
 work, bytes, elapsed time, memory and scratch space on the intended daily scope

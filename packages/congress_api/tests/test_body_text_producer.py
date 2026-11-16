@@ -5,6 +5,7 @@ about the tables a later run plans against, not about the producer's own report.
 """
 import hashlib
 import json
+from pathlib import Path
 
 import pyarrow.parquet as pq
 import pytest
@@ -15,24 +16,24 @@ from congress_api.lake import body_text
 
 
 def test_one_run_settles_every_parser_and_leaves_ocr_bodies_listed(tmp_path):
+    assert body_text.FORMAT_PARSERS == {'pdf': 'pdf_text', 'html': 'html_text', 'xml': 'xml_text'}
     bodies = dict(pdf=(two_page_pdf(), 'pdf'), scan=(scanned_pdf(), 'pdf'), html=(HTML, 'html'),
                   xml=(XML, 'xml'), warc=(warc_member(HTML), 'warc'), broken=(b'<x><y>', 'xml'),
                   zip=(b'PK\x03\x04', 'zip'))
     args, names = lake(tmp_path, bodies, gzip_stored={'html'})
     report = body_text.run(**args, work=tmp_path / 'run', execute=True)
-    assert report['status'] == 'pending' and report['work_items'] == 6  # the ZIP is no candidate
+    assert report['status'] == 'pending' and report['work_items'] == 5  # WARC envelopes and ZIP are not candidates
     [batch] = report['batches']
     assert (batch['ocr_pending'], batch['pending_reads'], batch['unreadable']) == (1, 0, 0)
     text = {names[bytes.fromhex(r['body'])]: r for r in committed(args, tmp_path / 'text', 'body_text',
             "parser,text,page_offsets,encode(text_sha256,'hex') AS sha,macos_build")}
-    assert set(text) == {'pdf', 'html', 'xml', 'warc'}
+    assert set(text) == {'pdf', 'html', 'xml'}
     assert text['pdf']['text'] == PAGE_ONE + '\n' + PAGE_TWO and text['pdf']['page_offsets'] == [0, len(PAGE_ONE) + 1]
-    assert text['warc']['text'] == text['html']['text'] and text['warc']['parser'] == 'warc'
     assert all(r['sha'] == hashlib.sha256(r['text'].encode()).hexdigest() and r['macos_build'] is None
                for r in text.values())
     rows = {names[bytes.fromhex(r['body'])]: r for r in committed(args, tmp_path / 'readings', 'readings',
             'parser,parser_version,status,error_type,text_bytes')}
-    assert set(rows) == {'pdf', 'html', 'xml', 'warc', 'broken'}  # the scan stays pending: no row
+    assert set(rows) == {'pdf', 'html', 'xml', 'broken'}  # the scan stays pending: no row
     assert rows['broken']['status'] == 'error' and rows['broken']['parser'] == 'xml_text'
     assert {r['parser_version'] for r in rows.values()} <= set(body_text.current_versions().values())
     assert all(rows[n]['text_bytes'] == len(text[n]['text'].encode()) for n in text)
@@ -81,6 +82,23 @@ def test_worker_returns_text_larger_than_the_supervisor_pipe_by_file(tmp_path):
     assert not (tmp_path / 'stage/texts').exists()  # staged text files leave with the stage
 
 
+def test_committed_batch_retains_opt_in_page_evidence_after_staged_text_cleanup(tmp_path):
+    args, _ = lake(tmp_path, dict(pdf=(two_page_pdf(), 'pdf')))
+    report = body_text.run(**args, work=tmp_path / 'run', execute=True, retain_quality_evidence=True)
+    [batch] = report['batches']
+    [outcome] = batch['body_outcomes']
+    [evidence] = outcome['quality_evidence_paths']
+    events = [json.loads(line) for line in Path(evidence).read_text().splitlines()]
+    assert events[0]['body_sha'] == outcome['body_sha256']
+    assert events[0]['parser_version'] == outcome['parser_version']
+    assert events[-1]['reading_status'] == 'completed'
+    assert [event['page'] for event in events if event['event'] == 'page_extracted'] == [1, 2]
+    [row] = committed(args, tmp_path / 'selected-text', 'body_text', 'text')
+    assert row['text'] == PAGE_ONE + '\n' + PAGE_TWO
+    assert not Path(batch['body_text']).exists()
+    assert Path(evidence).exists()
+
+
 class Scripted:
     """An in-process worker answering each parse with the next scripted outcome."""
     script, calls = [], []
@@ -127,6 +145,43 @@ def test_stored_size_limit_settles_without_opening_the_body(tmp_path):
     [row] = committed(args, tmp_path / 'readings', 'readings', 'status,error_type')
     assert (row['status'], row['error_type']) == ('size_limit', 'stored_size_limit')
     assert report['batches'][0]['body_text_rows'] == 0
+
+
+def test_explicit_recovery_reads_above_both_byte_exclusions_and_preserves_old_policy(tmp_path):
+    """A real padded PDF crosses both limits; its text is unchanged and separately identified."""
+    body = two_page_pdf() + b'\n' * (body_text.MAX_STORED_BYTES + 1)
+    args, _ = lake(tmp_path, dict(large=(body, 'pdf')))
+    plan = body_text.plan(captures=args['captures'], engine=args['engine'], work=tmp_path / 'plan',
+                          decided_at=STAMP, local_root=args['local_root'])
+    items = pq.read_table(plan['work_list']).to_pylist()
+    with pytest.raises(ValueError, match='recovery reading versions'):
+        body_text.stage(plan, items, engine=args['engine'], work=tmp_path / 'refused', recovery=True)
+    versions = body_text.recovery_versions()
+    plan['versions'] = versions
+    for item in items:
+        item['parser_version'] = versions[item['parser']]
+    staged = body_text.stage(plan, items, engine=args['engine'], work=tmp_path / 'recovered', recovery=True)
+    [row] = pq.read_table(staged['body_text']).to_pylist()
+    assert row['text'] == PAGE_ONE + '\n' + PAGE_TWO
+    assert row['parser_version'] == versions['pdf_text'] != body_text.current_versions()['pdf_text']
+    [outcome] = [json.loads(line) for line in (tmp_path / 'recovered/body-outcomes.jsonl').read_text().splitlines()]
+    assert outcome['reading_status'] == 'completed'
+    # The remote path decodes gzip through the same hash rule, with the exclusion removed explicitly.
+    import gzip
+    from contextlib import nullcontext
+    from unittest.mock import patch
+    stored = gzip.compress(body)
+    class Source:
+        size = len(stored)
+        def read(self, *_): return stored
+        def close(self): pass
+    request = dict(body_sha=hashlib.sha256(body).hexdigest(), stored_bytes=len(stored), cache=str(tmp_path),
+                   remote=dict(origin='https://example.invalid', key='unused', bucket='unused', etag='"pin"', md5=None))
+    with patch.object(body_text.readings, '_ReadOnceBody', return_value=Source()), \
+            patch.object(body_text, '_origin_store', return_value=None), \
+            patch('congress_api.lake.readings.reading_input', nullcontext):
+        assert body_text._read_remote(request) is None
+        assert body_text._read_remote(dict(request, unlimited_body_bytes=True)) == body
 
 
 def test_batches_are_sized_by_an_upper_bound_on_their_text():
@@ -208,3 +263,209 @@ def test_the_command_plans_and_executes_from_a_spec(tmp_path, capsys):
         command.main(['--spec', str(path), '--plan'])
     with pytest.raises(SystemExit):  # execution names its durable unreadable store
         command.main(['--spec', str(path), '--execute'])
+
+
+def test_worker_memory_limit_is_2_gib_and_pool_budget_allows_16_workers_under_14_gib_engine(tmp_path, capsys):
+    from congress_api.cli import body_text as command
+    from docspec_client.client import NativeDatasets
+    import os
+
+    assert body_text.WORKER_MEMORY_BYTES == 2 << 30
+    assert body_text.worker_limits()['memory_bytes'] == 2 << 30
+    assert body_text.PARSER_MEMORY_BYTES == 32 << 30
+    with NativeDatasets.from_config(os.environ['DOCSPEC_JOB_CONFIG']) as engine:
+        engine_mem = json.loads(engine.limits.read_text())['memory_bytes']
+    assert engine_mem == 14 << 30  # 14 GiB SQL engine limit must not cap body_text workers to 7
+
+    args, _ = lake(tmp_path, dict(xml=(XML, 'xml')))
+    spec = dict(captures=str(args['captures']), work=str(tmp_path / 'plan-16'), decided_at=STAMP,
+                catalog_root=str(args['catalog_root']), tables=TABLES, local_root=str(args['local_root']))
+    path = tmp_path / 'spec.json'
+    path.write_text(json.dumps(spec))
+    assert command.main(['--spec', str(path), '--plan', '--parser-workers', '16']) == 0
+    capsys.readouterr()
+
+    path.write_text(json.dumps(dict(spec, work=str(tmp_path / 'plan-17'))))
+    with pytest.raises(SystemExit):  # 17 * 2 GiB > default 32 GiB pool budget
+        command.main(['--spec', str(path), '--plan', '--parser-workers', '17'])
+
+    path.write_text(json.dumps(dict(spec, work=str(tmp_path / 'plan-18'))))
+    assert command.main(['--spec', str(path), '--plan', '--parser-workers', '18',
+                         '--parser-memory-bytes', str(36 << 30)]) == 0
+    capsys.readouterr()
+
+
+def test_withdrawn_unreadable_decision_reopens_the_body_at_the_same_parser_version(tmp_path):
+    from congress_api.retention.provenance import import_unreadable, validate_provenance
+    from congress_api.retention.provenance_inventory import unreadable_inventory
+
+    args, _ = lake(tmp_path, dict(pdf=(two_page_pdf(), 'pdf')))
+    planned = body_text.plan(captures=args['captures'], engine=args['engine'], work=tmp_path / 'plan-0',
+                             decided_at=STAMP, local_root=args['local_root'])
+    items = pq.read_table(planned['work_list']).to_pylist()
+    retry = dict(status='completed', value=dict(retry='page_deadline'))
+    Scripted.script, Scripted.calls = [retry, retry], []
+    staged = body_text.stage(planned, items, engine=args['engine'], work=tmp_path / 'stage-0',
+                             worker_factory=Scripted, unreadable_store=args['unreadable_store'])
+    assert staged['unreadable'] == 1
+    [wrong] = [json.loads(line) for line in (tmp_path / 'raw-provenance' / staged['unreadable_key']).read_text().splitlines()]
+
+    inv_before = unreadable_inventory(args['unreadable_store'], work=tmp_path / 'inv-before').files()
+    blocked = body_text.run(**args, work=tmp_path / 'blocked', unreadable_files=inv_before, execute=False)
+    assert blocked['work_items'] == 0
+
+    withdrawal = dict(
+        id=hashlib.sha256(f"withdraw:{wrong['id']}".encode()).hexdigest(),
+        body_sha256=wrong['body_sha256'],
+        parser=wrong['parser'],
+        parser_version=wrong['parser_version'],
+        reason='withdrawn',
+        decided_by='ct-a73a',
+        decided_at='2026-11-12T00:00:00Z',
+        supersedes=wrong['id'],
+    )
+    with pytest.raises(ValueError, match='Invalid unreadable'):
+        validate_provenance('unreadable', dict(withdrawal, supersedes=None))
+
+    withdraw_path = tmp_path / 'withdraw.jsonl'
+    withdraw_path.write_text(json.dumps(withdrawal, separators=(',', ':')) + '\n')
+    import_unreadable(args['unreadable_store'], withdraw_path, decided_at='2026-11-12T00:00:00Z')
+
+    reopened = body_text.run(**args, work=tmp_path / 'reopened', execute=True)
+    assert (reopened['status'], reopened['work_items'], reopened['applied']) == ('completed', 1, True)
+    [row] = committed(args, tmp_path / 'text-after', 'body_text', 'parser,parser_version,text')
+    assert row['parser'] == 'pdf_text' and row['parser_version'] == wrong['parser_version']
+    assert row['text'] == PAGE_ONE + '\n' + PAGE_TWO
+
+
+def test_stage_records_per_body_peak_rss_and_error_outcomes(tmp_path):
+    """[BLOCKER-2] stage() records per-body status, reason, error, and measured peak_rss_bytes."""
+    args, names = lake(tmp_path, dict(pdf=(two_page_pdf(), 'pdf'), broken=(b'<x><y>', 'xml')))
+    planned = body_text.plan(captures=args['captures'], engine=args['engine'], work=tmp_path / 'plan',
+                             decided_at=STAMP, local_root=args['local_root'])
+    staged = body_text.stage(planned, pq.read_table(planned['work_list']).to_pylist(),
+                             engine=args['engine'], work=tmp_path / 'stage',
+                             unreadable_store=args['unreadable_store'])
+    by_name = {names[bytes.fromhex(o['body_sha256'])]: o for o in staged['body_outcomes']}
+    assert set(by_name) == {'pdf', 'broken'}
+    assert by_name['pdf']['status'] == 'read' and by_name['pdf']['reading_status'] == 'completed'
+    assert isinstance(by_name['pdf']['peak_rss_bytes'], int) and by_name['pdf']['peak_rss_bytes'] > 0
+    assert by_name['pdf']['peak_rss_scope'] == 'request_sampled_worker_rss'
+    assert by_name['pdf']['rss_sample_interval_seconds'] == .05
+    assert by_name['pdf']['rss_samples'] > 0
+    assert by_name['pdf']['worker_lifetime_peak_rss_bytes'] > 0
+    assert by_name['broken']['status'] == 'read' and by_name['broken']['reading_status'] == 'error'
+    assert by_name['broken']['error'] is not None
+    assert isinstance(by_name['broken']['peak_rss_bytes'], int) and by_name['broken']['peak_rss_bytes'] > 0
+
+
+def test_retry_unreadable_script_dry_run_live_guard_and_idempotent_resume(tmp_path, monkeypatch):
+    """[BLOCKER-2] scripts/retry_unreadable_body_text.py handles dry-run, live-writer guard, and idempotent resume."""
+    import importlib.util
+    from pathlib import Path
+    import subprocess
+    from congress_api.retention.provenance import import_unreadable
+
+    script_path = Path(__file__).resolve().parents[3] / 'scripts' / 'retry_unreadable_body_text.py'
+    assert script_path.is_file(), f'Missing {script_path}'
+    spec = importlib.util.spec_from_file_location('retry_unreadable_body_text', script_path)
+    retry_mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(retry_mod)
+
+    args, names = lake(tmp_path, dict(a=(two_page_pdf(), 'pdf'), b=(HTML, 'html')))
+    digests = {name: digest.hex() for digest, name in names.items()}
+    vers = body_text.current_versions()
+    wrong_rows = [
+        dict(id='1' * 64, body_sha256=digests['a'], parser='pdf_text', parser_version=vers['pdf_text'],
+             reason='page_deadline', decided_by='body_text', decided_at='2026-11-09T19:00:00Z', supersedes=None),
+        dict(id='2' * 64, body_sha256=digests['b'], parser='html_text', parser_version=vers['html_text'],
+             reason='memory_limit', decided_by='body_text', decided_at='2026-11-09T19:00:00Z', supersedes=None),
+    ]
+    wrong_jsonl = tmp_path / 'wrong.jsonl'
+    wrong_jsonl.write_text(''.join(json.dumps(r) + '\n' for r in wrong_rows))
+    import_unreadable(args['unreadable_store'], wrong_jsonl, decided_at='2026-11-09T19:00:00Z')
+
+    unr_root = tmp_path / 'raw-provenance'
+    common = [
+        '--unreadable-root', str(unr_root),
+        '--catalog-root', str(args['catalog_root']),
+        '--captures', str(args['captures']),
+        '--local-root', str(args['local_root']),
+        '--strategy', 'congress_api.parsers.body_text:native_only',
+    ]
+
+    # 1. Dry-run leaves unreadable-store untouched and proves 0 -> 2 targeted items.
+    dry_dir = tmp_path / 'dry-work'
+    assert retry_mod.main([*common, '--dry-run', '--work-dir', str(dry_dir)]) == 0
+    dry_summary = json.loads((dry_dir / 'dry-run-summary.json').read_text())
+    assert dry_summary['targeted_work_items_before_withdraw'] == 0
+    assert dry_summary['targeted_work_items_after_withdraw'] == 2
+    assert len(list((unr_root / 'provenance/unreadable').glob('*.jsonl'))) == 1
+
+    # 2. Live-writer preflight refuses --apply when a writer is active unless --allow-concurrent is passed.
+    real_run = subprocess.run
+    pgrep_stdout = '55948 python bt_full_driver.py\n'
+
+    def fake_pgrep(cmd, *p_args, **p_kwargs):
+        if cmd and cmd[0] == 'pgrep':
+            return subprocess.CompletedProcess(cmd, 0 if pgrep_stdout else 1, stdout=pgrep_stdout, stderr='')
+        return real_run(cmd, *p_args, **p_kwargs)
+
+    monkeypatch.setattr(subprocess, 'run', fake_pgrep)
+    with pytest.raises(RuntimeError, match='bt_full_driver'):
+        retry_mod.main([*common, '--apply', '--work-dir', str(tmp_path / 'blocked-apply')])
+
+    # Also verify --body-listing passthrough in remote --dry-run mode.
+    import pyarrow as pa
+    listing_rows = []
+    for digest_hex in digests.values():
+        f = next(args['local_root'].glob(f'bodies/sha256/*/{digest_hex}*'))
+        raw_bytes = f.read_bytes()
+        listing_rows.append({
+            'key': f.relative_to(args['local_root']).as_posix(),
+            'size': len(raw_bytes),
+            'etag': '"' + hashlib.md5(raw_bytes).hexdigest() + '"',
+        })
+    listing_path = tmp_path / 'listing.parquet'
+    pq.write_table(pa.Table.from_pylist(listing_rows, schema=body_text.LISTING_SCHEMA), listing_path)
+    remote_dry_dir = tmp_path / 'remote-dry-work'
+    assert retry_mod.main([
+        '--unreadable-root', str(unr_root),
+        '--catalog-root', str(args['catalog_root']),
+        '--captures', str(args['captures']),
+        '--origin', 'https://example.invalid',
+        '--body-listing', str(listing_path),
+        '--dry-run',
+        '--work-dir', str(remote_dry_dir),
+    ]) == 0
+    assert json.loads((remote_dry_dir / 'dry-run-summary.json').read_text())['targeted_work_items_after_withdraw'] == 2
+
+    # 3. Partial --apply (body 'b' missing on disk -> pending_reads == 1) then idempotent resume on same --work-dir!
+    pgrep_stdout = ''
+    b_file = next(args['local_root'].glob(f"bodies/sha256/*/{digests['b']}*"))
+    saved_b_bytes = b_file.read_bytes()
+    b_file.unlink()
+
+    apply_dir = tmp_path / 'apply-work'
+    assert retry_mod.main([*common, '--apply', '--workers', '1', '--decided-at', '2026-11-12T01:00:00Z',
+                           '--work-dir', str(apply_dir)]) == 0
+    first = json.loads((apply_dir / 'apply-summary.json').read_text())
+    by_sha_1 = {o['body_sha256']: o for o in first['outcomes']}
+    assert by_sha_1[digests['a']]['status'] == 'read'
+    assert by_sha_1[digests['a']]['peak_rss_bytes'] > 0
+    assert by_sha_1[digests['b']]['status'] == 'pending'
+
+    # Restore body 'b' and re-run --apply on the EXACT SAME --work-dir (also checking --allow-concurrent when pgrep is non-empty):
+    pgrep_stdout = '55948 python bt_full_driver.py\n'
+    b_file.write_bytes(saved_b_bytes)
+    assert retry_mod.main([*common, '--apply', '--allow-concurrent', '--workers', '1',
+                           '--decided-at', '2026-11-12T01:05:00Z', '--work-dir', str(apply_dir)]) == 0
+    second = json.loads((apply_dir / 'apply-summary.json').read_text())
+    assert second['withdrawn_count'] == 0
+    by_sha_2 = {o['body_sha256']: o for o in second['outcomes']}
+    assert by_sha_2[digests['a']]['status'] == 'read'
+    assert by_sha_2[digests['a']]['peak_rss_bytes'] > 0
+    assert by_sha_2[digests['b']]['status'] == 'read'
+    assert by_sha_2[digests['b']]['peak_rss_bytes'] > 0
+
+

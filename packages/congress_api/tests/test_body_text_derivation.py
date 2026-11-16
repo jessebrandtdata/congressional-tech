@@ -4,12 +4,13 @@ Expectations come from the bodies' own words and page layout, not from re-runnin
 """
 import gzip
 import hashlib
+from pathlib import Path
 import signal
 import time
 
 import pytest
 
-from body_text_fixtures import HTML, PAGE_ONE, PAGE_TWO, XML, scanned_pdf, two_page_pdf, warc_member
+from body_text_fixtures import HTML, PAGE_ONE, PAGE_TWO, WEB_PAGE, XML, scanned_pdf, two_page_pdf, warc_member
 from congress_api.parsers import body_text as bt
 from congress_api.retention.sniff import read_sniff
 
@@ -18,9 +19,9 @@ def sniff(payload):
     return read_sniff(lambda start, length: payload[start:start + length], stored_size=len(payload))['format']
 
 
-def derive(data, parser, strategy=None, deadline=30.0):
+def derive(data, parser, strategy=None, deadline=30.0, evidence=None):
     return bt.derive(data, parser, strategy=strategy or bt.native_only(), page_deadline_seconds=deadline,
-                     sniff_format=sniff, max_bytes=64 << 20)
+                     sniff_format=sniff, max_bytes=64 << 20, evidence=evidence)
 
 
 def test_two_page_pdf_keeps_page_starts_as_utf8_offsets():
@@ -79,7 +80,9 @@ def footer_over_scan():
 def test_the_rule_counts_text_after_gpo_normalization_so_a_footer_alone_goes_to_ocr():
     from spicy_docs.extraction import NativeText
     data = footer_over_scan()
-    assert derive(data, 'pdf_text', strategy=NativeText()).text == ''  # GPO normalization drops the footer
+    # The preservation repair keeps an ambiguous operator label, but strips the
+    # known printing fields; this sparse native layer must still yield to OCR.
+    assert derive(data, 'pdf_text', strategy=NativeText()).text == 'WILDA'
     backend = FixedBackend()
     reading = derive(data, 'pdf_text', strategy=bt.page_rule(backend))
     assert backend.pages == 1 and reading.ocr_pages == (1,) and reading.text == 'VISION TEXT'
@@ -123,21 +126,216 @@ def test_a_failed_page_is_an_error_with_no_text():
     assert (reading.status, reading.error_type, reading.text) == ('error', 'failed_pages', None)
     assert reading.fields['failed_pages'] == [2] and reading.fields['page_count'] == 2
     assert reading.row()['text_bytes'] is None and reading.row()['fingerprint'] is None
+    assert 'Page 2:' in reading.diagnostic and 'render exceeds max_pixels' in reading.diagnostic
 
 
-class Slow:
+def test_optional_page_evidence_preserves_output_and_captures_pre_cleanup_text():
+    events = []
+    data = footer_over_scan()
+    from spicy_docs.extraction import NativeText
+    plain = derive(data, 'pdf_text', strategy=NativeText())
+    measured = derive(data, 'pdf_text', strategy=NativeText(), evidence=events.append)
+    assert measured == plain
+    [extracted] = [e for e in events if e['event'] == 'page_extracted']
+    [normalized] = [e for e in events if e['event'] == 'page_normalized']
+    assert 'VerDate Nov 24 2008' in extracted['pre_cleanup_text']
+    assert extracted['observations'][0]['blocks']
+    assert extracted['pre_cleanup_nonspace_chars'] > normalized['retained_nonspace_chars']
+    assert normalized['cleanup']['verdate_footer_lines'] == 1
+    assert normalized['retained_text_sha256'] == hashlib.sha256(measured.text.encode()).hexdigest()
+    assert [e for e in events if e['event'] == 'document_cleanup'][0]['gpo_footers']
+
+
+def test_page_evidence_keeps_ocr_output_and_routing_reason_without_raster_bytes():
+    events = []
+    reading = derive(scanned_pdf(), 'pdf_text', strategy=bt.page_rule(FixedBackend()), evidence=events.append)
+    [page] = [e for e in events if e['event'] == 'page_extracted' and e['page'] == 2]
+    assert page['pre_cleanup_text'] == 'VISION TEXT' and page['ocr']
+    observation = next(o for o in page['observations'] if o['id'] != 'native')
+    assert observation['text'] == 'VISION TEXT'
+    assert any(i['code'] == 'native-text-replaced' for i in observation['issues'])
+    assert 'images' not in observation and 'raw' not in observation
+    assert reading.ocr_pages == (2,) and reading.macos_build == '25Y111'
+
+
+def test_geometry_fallback_evidence_preserves_refused_line_without_changing_reading(monkeypatch):
+    import json
+    from spicy_docs.extraction import NativeGeometryError, NativeOrOcr, NativeText
+
+    details = dict(page=1, line=dict(spans=[dict(text='TX ', bbox=[12, 18, 12, 30])]),
+                   display_bbox=[12, 18, 12, 30], geometry=dict(rotation=0, dpi=72))
+    original = NativeText.extract
+
+    def refused_line(self, page):
+        if page.number == 1:
+            raise NativeGeometryError('zero_area', details={**details, 'unrelated': b'not retained'})
+        return original(self, page)
+
+    monkeypatch.setattr(NativeText, 'extract', refused_line)
+    data = two_page_pdf()
+    strategy = NativeOrOcr(FixedBackend(), native_geometry_fallback=('zero_area',))
+    plain = derive(data, 'pdf_text', strategy=strategy)
+    events = []
+    measured = derive(data, 'pdf_text', strategy=strategy, evidence=events.append)
+    assert measured == plain
+    assert measured.text == 'VISION TEXT\n' + PAGE_TWO and measured.ocr_pages == (1,)
+    [page] = [event for event in events if event['event'] == 'page_extracted' and event['page'] == 1]
+    [native] = [observation for observation in page['observations'] if observation['id'] == 'native']
+    assert native['native_geometry_details'] == details
+    assert any(issue['code'] == 'native-geometry-refused' for issue in native['issues'])
+    json.dumps(events)  # The diagnostic keeps geometry facts, never opaque raw objects.
+
+
+def test_failed_page_evidence_does_not_claim_a_complete_document():
+    events = []
+    reading = derive(two_page_pdf(), 'pdf_text', strategy=FailsPageTwo(), evidence=events.append)
+    assert reading.status == 'error' and reading.text is None
+    assert any(e['event'] == 'page_extracted' and e['page'] == 1 for e in events)
+    assert any(e['event'] == 'page_failed' and e['page'] == 2 for e in events)
+    assert not any(e['event'] == 'page_extracted' and e['page'] == 2 for e in events)
+
+
+def test_worker_streams_evidence_by_file_and_preserves_prior_attempts(tmp_path, monkeypatch):
+    import json
+    from congress_api.lake import body_text as producer
+    monkeypatch.setenv('DOCSPEC_PARSER_IO_MARKER', str(tmp_path / 'raw-io-marker'))
+    data = two_page_pdf()
+    body = tmp_path / 'body.pdf'
+    body.write_bytes(data)
+    texts = tmp_path / 'texts'
+    texts.mkdir()
+    request = dict(path=str(body), stored_bytes=len(data), body_sha=hashlib.sha256(data).hexdigest(),
+                   parser='pdf_text', parser_version='qualification-version', strategy=bt.DEFAULT_STRATEGY,
+                   page_deadline_seconds=30, texts=str(texts), quality_evidence=str(tmp_path / 'body.quality.jsonl'))
+    first = producer.parse_payload(json.dumps(request))
+    second = producer.parse_payload(json.dumps(request))
+    assert first['row'] == second['row']
+    assert first['quality_evidence']['path'] != second['quality_evidence']['path']
+    for result in (first, second):
+        reference = result['quality_evidence']
+        raw = Path(reference['path']).read_bytes()
+        assert reference['bytes'] == len(raw) and reference['sha256'] == hashlib.sha256(raw).hexdigest()
+        events = [json.loads(line) for line in raw.splitlines()]
+        assert events[0]['body_sha'] == request['body_sha']
+        assert events[0]['parser_version'] == request['parser_version']
+        assert events[-1]['event'] == 'derivation_finished' and events[-1]['reading_status'] == 'completed'
+        assert 'observations' not in json.dumps(result)
+        assert len(json.dumps(result)) < 8192
+
+
+def test_interrupted_evidence_file_keeps_finished_page_records(tmp_path):
+    import json
+    from congress_api.lake.body_text import _QualityEvidence
+    with pytest.raises(MemoryError):
+        with _QualityEvidence(dict(quality_evidence=str(tmp_path / 'body.quality.jsonl'))) as log:
+            log.emit(dict(event='page_extracted', page=1, pre_cleanup_text='finished first page'))
+            raise MemoryError('next page exceeded memory')
+    events = [json.loads(line) for line in Path(log.path).read_text().splitlines()]
+    assert events[1]['pre_cleanup_text'] == 'finished first page'
+    assert events[-1] == dict(event='attempt_interrupted', error_type='MemoryError')
+    assert not any(e['event'] == 'derivation_finished' for e in events)
+
+
+class BusyCpu:
     def extract(self, page):
-        time.sleep(5)
+        assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+        total = 0
+        while True:
+            total = (total + 1) & 0xFFFF
 
 
-def test_page_deadline_interrupts_the_page_and_restores_the_handler():
-    before = signal.getsignal(signal.SIGALRM)
+class Sleepy:
+    def extract(self, page):
+        from spicy_docs.extraction import NativeText
+        if page.number == 1:
+            time.sleep(0.18)
+        return NativeText().extract(page)
+
+
+def test_page_deadline_interrupts_cpu_work_and_restores_prior_virtual_timer_and_handler():
+    before = signal.getsignal(signal.SIGVTALRM)
     started = time.monotonic()
-    with pytest.raises(bt.PageDeadline):
-        derive(two_page_pdf(), 'pdf_text', strategy=Slow(), deadline=0.2)
-    assert time.monotonic() - started < 3
-    assert signal.getsignal(signal.SIGALRM) is before
-    assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+    with pytest.raises(bt.PageDeadline) as raised:
+        derive(two_page_pdf(), 'pdf_text', strategy=BusyCpu(), deadline=0.06)
+    assert raised.value.args == (1,)
+    assert time.monotonic() - started < 5
+    assert signal.getsignal(signal.SIGVTALRM) is before
+    assert signal.getitimer(signal.ITIMER_VIRTUAL) == (0.0, 0.0)
+
+    def caller_handler(*_):
+        pass
+
+    prev = signal.signal(signal.SIGVTALRM, caller_handler)
+    try:
+        signal.setitimer(signal.ITIMER_VIRTUAL, 10.0, 2.5)
+        with pytest.raises(bt.PageDeadline):
+            derive(two_page_pdf(), 'pdf_text', strategy=BusyCpu(), deadline=0.05)
+        delay, interval = signal.getitimer(signal.ITIMER_VIRTUAL)
+        assert signal.getsignal(signal.SIGVTALRM) is caller_handler
+        assert delay > 5.0 and interval == pytest.approx(2.5, abs=0.05)
+    finally:
+        signal.setitimer(signal.ITIMER_VIRTUAL, 0)
+        signal.signal(signal.SIGVTALRM, prev)
+
+
+def test_nested_page_deadline_subtracts_elapsed_user_cpu_from_outer_timer():
+    """[WARNING-2] Nested page_deadline subtracts spent user CPU when restoring an outer virtual timer."""
+    import resource
+
+    def outer_handler(*_):
+        pass
+
+    prev = signal.signal(signal.SIGVTALRM, outer_handler)
+    try:
+        signal.setitimer(signal.ITIMER_VIRTUAL, 2.0, 0.0)
+        with bt.page_deadline(5.0, 1):
+            target_utime = resource.getrusage(resource.RUSAGE_SELF).ru_utime + 0.22
+            acc = 0
+            while resource.getrusage(resource.RUSAGE_SELF).ru_utime < target_utime:
+                for i in range(25_000):
+                    acc += i
+            assert acc > 0
+        remaining, interval = signal.getitimer(signal.ITIMER_VIRTUAL)
+        assert signal.getsignal(signal.SIGVTALRM) is outer_handler
+        assert interval == 0.0
+        assert 0.0 < remaining < 1.85
+    finally:
+        signal.setitimer(signal.ITIMER_VIRTUAL, 0)
+        signal.signal(signal.SIGVTALRM, prev)
+
+
+def test_page_deadline_does_not_advance_across_sleep_or_sigstop():
+    import os
+    import subprocess
+    import sys
+
+    reading = derive(two_page_pdf(), 'pdf_text', strategy=Sleepy(), deadline=0.06)
+    assert reading.status == 'completed' and reading.text == PAGE_ONE + '\n' + PAGE_TWO
+
+    code = (
+        'import sys, time\n'
+        'from congress_api.parsers.body_text import page_deadline\n'
+        'with page_deadline(0.08, 1):\n'
+        '    sys.stdout.write("ready\\n")\n'
+        '    sys.stdout.flush()\n'
+        '    for line in sys.stdin:\n'
+        '        break\n'
+        'sys.stdout.write("done\\n")\n'
+    )
+    child = subprocess.Popen([sys.executable, '-c', code], stdin=subprocess.PIPE,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        assert child.stdout.readline().strip() == 'ready'
+        os.kill(child.pid, signal.SIGSTOP)
+        time.sleep(0.22)
+        os.kill(child.pid, signal.SIGCONT)
+        out, err = child.communicate('go\n', timeout=5)
+        assert child.returncode == 0, err
+        assert out.strip() == 'done'
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
 
 
 def test_not_a_pdf_is_an_error_reading():
@@ -147,12 +345,49 @@ def test_not_a_pdf_is_an_error_reading():
 def test_html_pre_transcript_keeps_its_layout_and_drops_the_title():
     reading = derive(HTML, 'html_text')
     assert reading.text == 'STATEMENT OF THE WITNESS\n\n    Mr. Chairman, thank you.\n'
-    assert reading.page_offsets == (0,) and reading.fields == {'page_count': 1}
+    assert reading.page_offsets == (0,) and reading.fields['page_count'] == 1
+    assert reading.fields['source_sha256'] == hashlib.sha256(HTML).hexdigest()
+    assert reading.fields['source_encoding'] == 'utf-8'
+    assert reading.fields['encoding_basis'] == 'utf-8'
+
+
+def test_web_page_text_has_no_script_or_css_and_block_elements_do_not_glue_words():
+    reading = derive(WEB_PAGE, 'html_text')
+    # Each block element's words on their own line; an inline <b> breaks nothing. spicy-docs 0.79.0 read
+    # this page as its JSON-LD, CSS, script, <noscript> and <template> text, then
+    # 'AboutChairHearingsArchived2021MarchThe full committee met.It adjourned.'
+    assert reading.text == ('About\nChair\nHearings\nArchived\n2021\nMarch\n'
+                            'The full committee met.\nIt adjourned.')
+    for mark in ('JSONLD_MARK', 'CSS_MARK', 'SCRIPT_MARK', 'NOSCRIPT_MARK', 'TEMPLATE_MARK',
+                 'schema.org', 'dataLayer', 'margin', 'Hearings | Committee'):
+        assert mark.encode() in WEB_PAGE and mark not in reading.text
+    assert derive(warc_member(WEB_PAGE), 'warc').text == reading.text
+
+
+def test_html_tags_gpo_never_closes_do_not_refuse_the_body():
+    # GPO prints literal <bullet> tags inside a report's <pre>; 300 unclosed ones passed the old depth of 256.
+    reading = derive(b'<html><body><pre>' + b'<bullet> item\n' * 300 + b'</pre></body></html>', 'html_text')
+    assert reading.status == 'completed' and reading.text == ' item\n' * 300
 
 
 def test_xml_elements_become_lines():
     assert derive(XML, 'xml_text').text == 'Oversight\nThe committee met.'
     assert derive(b'<hearing><unclosed>', 'xml_text').status == 'error'
+
+
+@pytest.mark.parametrize(('parser', 'source', 'expected'), [
+    ('html_text', b'<nav><a>About</a><a>Chair</a></nav><p>The <b> Act </b> applies.</p>'
+     b'<pre>  A    B\n  1    2\n</pre><p>anti<a>discrimination</a>.</p>',
+     'About Chair\nThe Act applies.\n  A    B\n  1    2\nantidiscrimination.'),
+    ('xml_text', b'<record><metadata>Provenance</metadata><name>Alice</name><amount>100</amount></record>',
+     'Provenance\nAlice\n100'),
+    ('xml_text', b'<u:resolution xmlns:u="http://schemas.gpo.gov/xml/uslm"><u:meta>Catalog</u:meta>'
+     b'<u:p>The <u:term>Act</u:term>.</u:p><u:p>Next.</u:p></u:resolution>', 'The Act.\nNext.'),
+])
+def test_installed_markup_reader_preserves_layout_and_qualifies_xml(parser, source, expected):
+    reading = derive(source, parser)
+    assert reading.status == 'completed' and reading.text == expected
+    assert reading.page_offsets == (0,) and reading.ocr_pages == ()
 
 
 def test_warc_unwraps_its_payload_and_reads_it_by_sniffed_format():
@@ -214,7 +449,8 @@ def test_body_text_evidence_is_recorded_and_its_drift_is_named():
     from congress_api.lake import reading_version_diagnostics as diagnostics
     recorded = json.loads((diagnostics.ROOT / diagnostics.BASELINE).read_text())
     current = diagnostics.body_text_evidence(diagnostics.ImportClosure(diagnostics.ROOT))
-    for parser in ('pdf_text', 'html_text', 'xml_text', 'warc'):
+    assert set(current) == {'pdf_text', 'html_text', 'xml_text'}
+    for parser in ('pdf_text', 'html_text', 'xml_text'):
         assert recorded[parser]['version'] == current[parser]['version']
         assert recorded[parser]['sample_sha256'] == diagnostics.sample_digest(parser)
     moved = dict(current['pdf_text'], pymupdf='0.0.0')
@@ -223,3 +459,181 @@ def test_body_text_evidence_is_recorded_and_its_drift_is_named():
     # A host without Vision has no OCR build to compare.
     assert not list(diagnostics.drift_messages({'pdf_text': current['pdf_text']},
                                                {'pdf_text': dict(current['pdf_text'], macos_build=None)}))
+
+
+# ct-r91j (owner, 2026-11-11): reading evidence covers only the code a reader runs to turn a body into text.
+BODY_TEXT = ('pdf_text', 'html_text', 'xml_text')
+PAGE = ('html', 'xml', 'json')
+
+
+def edited_checkout(tmp_path, relative):
+    """This checkout under tmp_path with one file's bytes changed: every entry is a link into the
+    real tree except the folders leading to `relative` and `relative` itself, an edited copy."""
+    from congress_api.lake.reading_version_diagnostics import ROOT
+    source, mirror = ROOT, tmp_path / 'checkout'
+    for part in Path(relative).parts:
+        mirror.mkdir()
+        for entry in source.iterdir():
+            if entry.name != part:
+                (mirror / entry.name).symlink_to(entry)
+        source, mirror = source / part, mirror / part
+    comment = b'#' if source.suffix == '.py' else b'--'
+    mirror.write_bytes(source.read_bytes() + b'\n' + comment + b' an edit (ct-r91j test)\n')
+    return tmp_path / 'checkout'
+
+
+@pytest.fixture(scope='module')
+def evidence_now():
+    from congress_api.lake import reading_version_diagnostics as diagnostics
+    return diagnostics.snapshot()
+
+
+def moved_entries(before, root):
+    from congress_api.lake import reading_version_diagnostics as diagnostics
+    after = diagnostics.snapshot(root)
+    assert set(after) == set(before)
+    return {entry for entry in before if any(before[entry][field] != after[entry][field]
+                                             for field in ('workspace_sha256', 'locked_sha256'))}
+
+
+# Each was edited this week without any reader running it, and each edit warned on readers:
+# W1 and W5 (client), W1 and W4 (provenance), ct-an6o and ct-p394 (versions), table I/O, and
+# the retention tables the retention package's initializer re-exports.
+@pytest.mark.parametrize('plumbing', [
+    'packages/docspec_client/src/docspec_client/client.py',
+    'packages/congress_api/src/congress_api/retention/provenance.py',
+    'packages/congress_api/src/congress_api/lake/versions.py',
+    'packages/congress_api/src/congress_api/lake/tables.py',
+    'packages/congress_api/src/congress_api/retention/weekly_tables.py',
+])
+def test_an_edit_to_plumbing_no_reader_runs_leaves_every_reading_evidence_value(tmp_path, evidence_now, plumbing):
+    assert moved_entries(evidence_now, edited_checkout(tmp_path, plumbing)) == set()
+
+
+# Code a reader runs to turn a body into text still moves that reader: its parser, the derivation,
+# the format sniff body text routes by, the shared dispatcher and worker, and the bundle's own SQL.
+@pytest.mark.parametrize('code,readers', [
+    ('packages/congress_api/src/congress_api/parsers/body_text.py', set(BODY_TEXT)),
+    ('packages/congress_api/src/congress_api/lake/body_text.py', set(BODY_TEXT)),
+    ('packages/congress_api/src/congress_api/retention/sniff.py', {'sniff', 'readings', *BODY_TEXT}),
+    ('packages/congress_api/src/congress_api/parsers/archive_readings.py', {*PAGE, 'readings', *BODY_TEXT}),
+    ('packages/congress_api/src/congress_api/parsers/html_metadata.py', {'html_metadata'}),
+    ('packages/congress_api/src/congress_api/lake/readings.py',
+     {'sniff', *PAGE, 'html_metadata', 'readings', *BODY_TEXT}),
+    ('packages/congress_api/src/congress_api/retention/parser_worker.py',
+     {'sniff', *PAGE, 'html_metadata', 'readings', *BODY_TEXT}),
+    ('model/sql/sniff-facts.sql', {'readings'}),
+    # The selection rule pinned-readings.sql reads (selected_readings_steps).
+    ('packages/congress_api/src/congress_api/lake/compatible_versions.py', {'readings'}),
+])
+def test_an_edit_to_code_a_reader_runs_moves_that_readers_evidence(tmp_path, evidence_now, code, readers):
+    assert readers <= moved_entries(evidence_now, edited_checkout(tmp_path, code))
+
+
+def test_a_stopped_folder_is_neither_walked_nor_hashed(monkeypatch):
+    """The walk stops at a STOP prefix, folder or file; evidence must drop by the same rule, not only exact files."""
+    from congress_api.lake import reading_version_diagnostics as diagnostics
+    folder = diagnostics.SOURCE / 'models'  # the page readers import from it
+    assert any(path.startswith(folder.as_posix() + '/') for path in diagnostics.evidence_files()['html'])
+    monkeypatch.setattr(diagnostics, 'STOP', (*diagnostics.STOP, folder))
+    assert not [path for path in diagnostics.evidence_files()['html'] if path.startswith(folder.as_posix() + '/')]
+
+
+def reader_runs(tmp_path):
+    """Each group of entries and a call that runs its reader's worker callable over its fixture bodies:
+    readings.parse_payload for the sniff, page and HTML metadata readers, parse_once_payload for the
+    bundle, and lake/body_text.parse_payload for the body-text readers."""
+    import json
+    from congress_api.lake import body_text, compatible_versions, readings
+    from congress_api.lake.reading_version_diagnostics import ROOT
+    cases = [(case['body'].encode(), case['parser']) for case in json.loads((ROOT / 'model/fixtures/parser-cases.json').read_text())]
+    bodies = {'pdf': (two_page_pdf(), 'pdf_text'), 'html': (HTML, 'html_text'), 'xml': (XML, 'xml_text'),
+              'web': (WEB_PAGE, 'html_text'), 'gzip': (gzip.compress(HTML), 'html_text'),
+              'cover': ((FIXTURES / 'document-covers/house-hearing.pdf').read_bytes(), 'pdf_text')}
+    metadata = (FIXTURES / 'html_metadata/marked-no-statement.html').read_bytes()
+    written = iter(range(10 ** 6))
+
+    def payload(stored, **fields):
+        path = tmp_path / f'body-{next(written)}'
+        path.write_bytes(stored)
+        # The gzip storage case is known by its decoded hash; every other body by its stored bytes.
+        plain = HTML if stored is bodies['gzip'][0] else stored
+        return json.dumps(dict(fields, path=str(path), stored_bytes=len(stored),
+                               body_sha=hashlib.sha256(plain).hexdigest())).encode()
+
+    def body_text_worker():
+        for data, parser in bodies.values():
+            texts = tmp_path / f'texts-{next(written)}'
+            texts.mkdir()
+            body_text.parse_payload(payload(data, parser=parser, strategy=bt.DEFAULT_STRATEGY,
+                                            page_deadline_seconds=0, texts=str(texts)))
+
+    def bundle():
+        for data, _ in cases:
+            path = tmp_path / f'cache-{next(written)}'
+            readings.parse_once_payload(payload(data, cache=str(path), known_format=None, skip_parsers=[],
+                versions={name: 'sample' for name in compatible_versions.LEAF_PARSERS}))
+
+    return {
+        ('sniff',): lambda: [readings.parse_payload(payload(data, parser='sniff'))
+                             for data in [data for data, _ in cases] + [data for data, _ in bodies.values()]],
+        PAGE: lambda: [readings.parse_payload(payload(data, parser=parser)) for data, parser in cases],
+        ('html_metadata',): lambda: readings.parse_payload(payload(metadata, parser='html_metadata')),
+        ('readings',): bundle,
+        BODY_TEXT: body_text_worker,
+    }
+
+
+def traced(run, monkeypatch):
+    """Workspace files whose functions ran in `run`, with every cache in the workspace's source emptied
+    first: evidence modules and the unwalked ones an escape would live in alike, so what a run reaches
+    does not depend on what ran before it in this process. Function bodies only: module and class
+    bodies are import-time code, not reading."""
+    import inspect
+    import sys
+    from congress_api.lake import body_text
+    from congress_api.lake.reading_version_diagnostics import ROOT
+
+    def workspace(name):
+        return bool(name) and name.startswith(str(ROOT)) and '/src/' in name and '/.venv/' not in name
+
+    def clear_workspace_caches():
+        for module in list(sys.modules.values()):
+            if workspace(getattr(module, '__file__', None)):
+                for value in list(vars(module).values()):
+                    if callable(getattr(value, 'cache_clear', None)):
+                        value.cache_clear()
+                if getattr(module, '__name__', None) == 'house_naming.naming':
+                    for attr in ('HOUSE_NAMING', 'COLLECTION_CODES', 'APPROPRIATION_SUBJECTS'):
+                        vars(module).pop(attr, None)
+
+    clear_workspace_caches()
+    monkeypatch.setattr(body_text, '_STRATEGIES', {})
+    ran = set()
+
+    def profile(frame, event, arg):
+        name = frame.f_code.co_filename
+        if event == 'call' and frame.f_code.co_flags & inspect.CO_OPTIMIZED and workspace(name):
+            ran.add(Path(name).relative_to(ROOT).as_posix())
+
+    sys.setprofile(profile)
+    try:
+        run()
+    finally:
+        sys.setprofile(None)
+        clear_workspace_caches()
+    return ran
+
+
+def test_every_file_a_reader_runs_on_its_fixtures_is_in_its_evidence(tmp_path, monkeypatch):
+    """The declared reader modules, checked against execution: each reader's worker callable runs its fixture
+    bodies under a profiler, and every workspace file whose functions ran must be among that entry's evidence
+    files. It cannot see branches the fixtures do not reach (the remote read path, most refusals)."""
+    from congress_api.lake import reading_version_diagnostics as diagnostics
+    monkeypatch.setenv('DOCSPEC_PARSER_IO_MARKER', str(tmp_path / 'io.phase'))
+    evidence = diagnostics.evidence_files()
+    for entries, run in reader_runs(tmp_path).items():
+        ran = traced(run, monkeypatch)
+        assert ran, entries
+        for entry in entries:
+            assert ran <= evidence[entry], (entry, sorted(ran - evidence[entry]))

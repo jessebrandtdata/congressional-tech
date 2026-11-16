@@ -166,7 +166,7 @@ def _dumps(value):
     return json.dumps(value,sort_keys=True,default=_json_path)
 
 
-def plan(spec):
+def plan(spec, *, runtime_factory=None):
     require_no_derived(spec)
     if spec.get('status')=='blocked':return dict(spec)
     if 'record_only' in spec:
@@ -194,6 +194,27 @@ def plan(spec):
     )
     if 'selective' in spec:
         planned.update(where=spec['selective']['where'],base=spec['selective']['base'],resume=spec['resume'])
+        return planned
+    from tempfile import TemporaryDirectory
+    from congress_api.lake.daily import inspect_targets, writer_field_paths
+    from docspec_client.client import NativeDatasets, choose_runtime
+
+    planned['writer_schemas'] = {name: sorted(writer_field_paths(name)) for name in spec['tables']}
+    local_catalog = spec['catalog_root'] is not None and Path(spec['catalog_root']).exists()
+    engine_config, _ = choose_runtime(spec.get('engine_config'), job_fallback=local_catalog)
+    if isinstance(engine_config, str) and engine_config.strip():
+        factory = runtime_factory or NativeDatasets.from_config
+        with factory(engine_config) as engine:
+            if (spec['catalog_root'] is None) == (getattr(engine, 'remote', None) is not None):
+                engine.verify_runtime()
+                max_items = spec.get('max_work_items', spec['batch_size'] * spec['max_batches'])
+                with TemporaryDirectory(prefix='backfill-plan-') as temp:
+                    inspected = inspect_targets(
+                        spec['tables'], engine=engine, catalog_root=spec['catalog_root'],
+                        work=temp, include_counts=True, max_work_items=max_items,
+                    )
+                planned['target_schemas'] = inspected['target_schemas']
+                planned['record_counts'] = inspected['record_counts']
     return planned
 
 
@@ -341,23 +362,34 @@ def execute(spec,*,runtime_factory=None,storage_factory=None,producer=None,activ
     work=Path(spec['work'])
     if work.exists() or work.is_symlink():
         raise ValueError('Backfill work directory must be fresh')
-    engine_config=(spec.get('engine_config')
-        or os.environ.get('DOCSPEC_RUNTIME_CONFIG')
-        or os.environ.get('DOCSPEC_JOB_CONFIG'))
-    if not isinstance(engine_config,str) or not engine_config.strip():
-        raise ValueError('Backfill execution requires an explicit engine_config or DOCSPEC_RUNTIME_CONFIG')
-    from congress_api.lake.daily import produce_daily
+    import sys
+    from tempfile import TemporaryDirectory
+    from congress_api.lake import tables as lake_tables
+    from congress_api.lake.daily import produce_daily, verify_target_schemas
     from congress_api.retention.body_store import BodyStore,R2Adapter
     from congress_api.retention.provenance_inventory import provenance_inventory
     from congress_api.retention.r2 import configure_read_retries
     from congress_shared.storage import connect_r2
-    from docspec_client.client import NativeDatasets
+    from docspec_client.client import NativeDatasets,choose_runtime,runtime_record
+    engine_config,choice=choose_runtime(spec.get('engine_config'),job_fallback=True)
+    if not isinstance(engine_config,str) or not engine_config.strip():
+        raise ValueError('Backfill execution requires an explicit engine_config or DOCSPEC_RUNTIME_CONFIG')
     runtime_factory=runtime_factory or NativeDatasets.from_config
     storage_factory=storage_factory or connect_r2
+    check_targets=producer is None
     producer=producer or produce_daily
     decided_at=spec.get('decided_at') or datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     with runtime_factory(engine_config) as engine:
+        ran=runtime_record(engine_config,choice,log=sys.stderr)
         engine.verify_runtime()
+        verified_heads=None
+        if check_targets:
+            with TemporaryDirectory(prefix='backfill-preflight-') as temp:
+                verified_heads=lake_tables.resolve_tables(
+                    engine=engine, work=Path(temp)/'heads',
+                    catalog_root=spec['catalog_root'], tables=spec['tables'],
+                )
+                verify_target_schemas(verified_heads, engine=engine, work=Path(temp)/'schemas')
         # Body GETs retry transient R2 server errors and throttling; writes keep one attempt.
         client=configure_read_retries(storage_factory(bucket=spec['bucket'],retries={'total_max_attempts':1}))
         raw_store=BodyStore(R2Adapter(client,spec['bucket']))
@@ -386,7 +418,8 @@ def execute(spec,*,runtime_factory=None,storage_factory=None,producer=None,activ
             for name,pin in spec['producers'].items():
                 identity=_verify_metadata(pin);anchors[name]=Path(pin['path']).read_bytes();identity.require(pin['path'])
             records=ProducerRecords(anchors,client=client,bucket=spec['bucket'])
-        production=producer(daily_spec,engine=engine,raw_store=raw_store,producer_records=records)
+        extra=dict(verified_heads=verified_heads) if verified_heads is not None and producer is produce_daily else {}
+        production=producer(daily_spec,engine=engine,raw_store=raw_store,producer_records=records,**extra)
     work.mkdir(parents=True,exist_ok=True)
     report=dict(
         status='executed',
@@ -394,6 +427,8 @@ def execute(spec,*,runtime_factory=None,storage_factory=None,producer=None,activ
         bucket=spec['bucket'],
         catalog_root=spec['catalog_root'],
         work=spec['work'],
+        engine_config=engine_config,
+        engine_runtime=ran,
         production=production,
     )
     (work/'backfill-report.json').write_text(_dumps(report)+'\n',encoding='utf-8')

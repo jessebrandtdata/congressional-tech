@@ -1,4 +1,5 @@
-"""Append-only provenance records and pinned, local-only import stages."""
+"""Append-only provenance records, pinned local-only import stages, and the engine job helpers they run on."""
+from contextlib import nullcontext
 from datetime import datetime
 from hashlib import file_digest, sha256
 import json
@@ -78,7 +79,8 @@ def validate_provenance(kind,row):
         if re.fullmatch('[0-9a-f]{64}',row[identity]) is None:
             raise ValueError('Unreadable identity must be canonical lowercase SHA-256')
         for name in ('parser','parser_version','reason','decided_by'):text(name)
-        if re.fullmatch('[a-z][a-z0-9_]*',row['reason']) is None:
+        if (re.fullmatch('[a-z][a-z0-9_]*',row['reason']) is None
+                or (row['reason']=='withdrawn' and row['supersedes'] is None)):
             raise ValueError('Invalid unreadable reason')
     elif kind=='reviews':
         verdict=row['verdict']
@@ -334,7 +336,7 @@ def parquet_output(root,name,sql,order):
             columns=[],dictionary_columns=[],delta_columns=[],created_by='docspec raw provenance v1',footer_limit=512<<10))
 
 
-def run_job(root,engine,*,inputs,steps,outputs,queries=()):
+def _run_job_raw(root,engine,*,inputs,steps,outputs,queries=()):
     from congress_api.lake.model_sql import check_relations
     check_relations(inputs,steps)
     root=Path(root)
@@ -342,9 +344,91 @@ def run_job(root,engine,*,inputs,steps,outputs,queries=()):
     path=root/'job.json'
     path.write_text(json.dumps(dict(scratch=str(root/'native'),inputs=inputs,steps=steps,
                                    outputs=outputs,queries=list(queries)),separators=(',',':')))
-    result=engine.run_job(path)
+    result=engine.run_job(path,log=root/'engine.log')
     (root/'result.json').write_text(json.dumps(result,separators=(',',':')))
+    return result
+
+
+def run_job(root,engine,*,inputs,steps,outputs,queries=()):
+    """Run one engine job in `root`, leaving `job.json`, the engine's stderr in `engine.log`, and `result.json`.
+
+    `engine.log` is this job's own metric lines and error text. The model build submits its job itself
+    (`viewer_publication.archive_format`) and keeps no such log yet (ct-zlj6)."""
+    result=_run_job_raw(root,engine,inputs=inputs,steps=steps,outputs=outputs,queries=queries)
     return {query['name']:query['data'] for query in result.get('queries',[])}
+
+
+def bounded_engine(engine,directory,**ceilings):
+    """The same pinned runtime with each named limit at most its ceiling; the derived `limits.json` sits in `directory`.
+
+    An engine already within every ceiling is returned as it is. A runtime without limits cannot run a
+    native job at all, so it passes through and the engine's own refusal keeps its order. Close a returned
+    engine that is not the one passed in."""
+    if getattr(engine,'limits',None) is None:return engine
+    limits=json.loads(Path(engine.limits).read_text())
+    for name in ceilings:
+        if type(limits.get(name)) is not int or limits[name]<=0:
+            raise ValueError(f'A bounded engine requires positive native {name}')
+    if all(limits[name]<=ceiling for name,ceiling in ceilings.items()):return engine
+    directory=Path(directory);directory.mkdir(parents=True,exist_ok=True)
+    path=directory/'limits.json'
+    path.write_text(json.dumps({**limits,**{name:min(limits[name],ceiling) for name,ceiling in ceilings.items()}},indent=2)+'\n')
+    return engine.with_limits(path)
+
+
+QUERY_MEMORY_BYTES=2<<30
+QUERY_SCRATCH_BYTES=2<<30
+
+
+def _query_job(engine,queries,tables,*,memory_bytes=QUERY_MEMORY_BYTES,scratch_bytes=QUERY_SCRATCH_BYTES,work=None):
+    """One throwaway `run_job` of `queries` over `tables`: no steps, no outputs, memory and scratch lowered.
+
+    The engine plans no DDL or DML in a job query, so nothing is written outside the job's folder. `work`
+    keeps the job (`job.json`, `engine.log`, `result.json`, and `limits.json` when a limit was lowered) and
+    must be absent or empty, so no
+    earlier run's file sits beside it. Otherwise the folder is temporary and removed on return; dev.py turns
+    the watchdog's TERM into a return, and a KILLed query leaves at most `scratch_bytes` of spill behind."""
+    from congress_api.lake.tables import table_input
+    inputs=[table_input(name,source) for name,source in tables.items()]
+    if work is not None and Path(work).is_dir() and any(Path(work).iterdir()):
+        raise ValueError(f'{work} is not empty: a kept query needs a folder of its own')
+    with nullcontext(work) if work is not None else TemporaryDirectory(prefix='docspec-query-') as root:
+        bounded=bounded_engine(engine,root,memory_bytes=memory_bytes,scratch_bytes=scratch_bytes)
+        try:
+            result=_run_job_raw(root,bounded,inputs=inputs,steps=[],outputs=[],queries=queries)
+            return {entry['name']:entry for entry in result.get('queries',[])}
+        finally:
+            if bounded is not engine:bounded.close()
+
+
+def query_result(engine,sql,tables,**options):
+    """Column names and rows of one read-only statement over `tables` (name: Parquet path or exact table pin).
+
+    The engine refuses a statement whose result schema repeats a column name (`invalid_sql`, ct-pyai) and
+    records `columns` in the statement's output order alongside each row's sorted JSON map, so rows come
+    back in the statement's column order without a planning pre-pass. Values are the engine's JSON: binary
+    as lowercase hex, timestamps as RFC 3339 text. The result must fit the runtime's `max_metadata_bytes`,
+    and the engine charges its Arrow batches and serialized JSON buffer to the memory pool. Options are
+    `_query_job`'s. A pin is read through whatever object connection `engine` has: none for a local runtime."""
+    entry=_query_job(engine,[dict(name='query',sql=sql)],tables,**options)['query']
+    columns=entry['columns']
+    rows=entry['data']
+    if rows and sorted(rows[0])!=sorted(columns):
+        raise ValueError(f'The engine returned columns {sorted(rows[0])}, its schema names {columns}')
+    return columns,[{name:row[name] for name in columns} for row in rows]
+
+
+def query(engine,sql,tables,**options):
+    """Rows of one read-only statement over `tables`, in the statement's column order (`query_result`)."""
+    return query_result(engine,sql,tables,**options)[1]
+
+
+def explain(engine,sql,tables,*,analyze=False,**options):
+    """The engine's plans for `sql` by plan type (`logical_plan`, `physical_plan`); nothing is run.
+
+    With `analyze` the statement runs and its plan says what each operator did (`Plan with Metrics`)."""
+    sql=('EXPLAIN ANALYZE ' if analyze else 'EXPLAIN ')+sql
+    return {row['plan_type']:row['plan'] for row in _query_job(engine,[dict(name='plan',sql=sql)],tables,**options)['plan']['data']}
 
 
 def parquet_records(path):
@@ -352,3 +436,17 @@ def parquet_records(path):
     with pq.ParquetFile(path) as source:
         for batch in source.iter_batches(batch_size=1024):
             yield from batch.to_pylist()
+
+
+def active_unreadable_where(table='unreadable', alias='u'):
+    """SQL predicate for non-withdrawn, non-superseded unreadable records."""
+    return (f"coalesce({alias}.reason,'')<>'withdrawn' "
+            f"AND NOT EXISTS (SELECT 1 FROM {table} s WHERE s.supersedes={alias}.id)")
+
+
+def active_unreadable_rows(rows):
+    """Filter validated unreadable dicts to active (non-withdrawn, non-superseded) decisions."""
+    items = list(rows)
+    superseded = {row.get('supersedes') for row in items if row.get('supersedes')}
+    return [row for row in items if row['id'] not in superseded and row.get('reason') != 'withdrawn']
+

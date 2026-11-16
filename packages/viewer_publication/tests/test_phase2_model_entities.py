@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -601,6 +602,17 @@ def test_phase2_entities_meetings_witnesses_recordings_and_spicy_projections(tmp
             ),
             dict(
                 bill_id='118-hr-9999',
+                title='Dropped Congress.gov Bill retained as unlisted subject',
+                short_title='Retained Act',
+                sponsor_bioguide_id='A000001',
+                introduced_date='2023-01-10',
+                latest_action_date='2023-01-10',
+                latest_action_text='Introduced',
+                stage='introduced',
+                policy_area='Other',
+            ),
+            dict(
+                bill_id='118-hr-8888',
                 title='Unreferenced Bill that must be excluded',
                 short_title='Excluded Act',
                 sponsor_bioguide_id='A000001',
@@ -736,7 +748,8 @@ def test_phase2_entities_meetings_witnesses_recordings_and_spicy_projections(tmp
     expected_parquet = {
         'list.parquet', 'detail.parquet', 'links.parquet', 'urls.parquet',
         'sources.parquet', 'recoveries.parquet', 'meetings.parquet',
-        'witnesses.parquet', 'recordings.parquet', 'committees.parquet',
+        'witnesses.parquet', 'witness_key_map.parquet', 'people.parquet', 'person_aliases.parquet',
+        'recordings.parquet', 'committees.parquet',
         'members.parquet', 'rosters.parquet', 'bills.parquet',
         'nominations.parquet', 'url_state.parquet', 'url_variants.parquet',
     }
@@ -822,8 +835,11 @@ def test_phase2_entities_meetings_witnesses_recordings_and_spicy_projections(tmp
     assert m['status'] == 'Scheduled'
     assert m['sittings'][0]['place'] == '1300, LHOB, Washington, DC'
     assert m['committees'] == [{'system_code': 'hsag00', 'role': 'primary'}]
-    assert m['document_references'] == meeting_records[1]['meetings'][0]['document_references']
-    assert m['subject_keys'] == ['115-hr-1', '118-hr-1234', '118-pn-123']
+    assert m['document_references'] == [
+        {**ref, 'listing_status': 'listed', 'last_listed_on': None, 'unlisted_since': None, 'unlisted_by_record_sha': None}
+        for ref in meeting_records[1]['meetings'][0]['document_references']
+    ]
+    assert m['subject_keys'] == ['115-hr-1', '118-hr-1234', '118-hr-9999', '118-pn-123']
     # The print first, then the recording's two complete caption tracks (ct-1i4q).
     assert [(t['source'], t['package_id'], t['video_key'], t['production']) for t in m['transcripts']] == [
         ('printed_hearing', 'CHRG-118hhrg55555', None, None),
@@ -836,7 +852,7 @@ def test_phase2_entities_meetings_witnesses_recordings_and_spicy_projections(tmp
     assert m['transcripts'][0]['formats'] == ['pdf', 'html']
     assert [v['video_key'] for v in m['videos']] == ['youtube:dQw4w9WgXcQ', 'senate:ag051023']
 
-    # Verify CHRG document linked to meeting 115538 and inherited meeting_date, without individual witness_keys
+    # Verify CHRG document linked to meeting 115538 and inherited meeting_date + canonical MODS witness_keys (cat2-x47u, cat2-8ai9)
     listed = pq.read_table(release_dir / 'list.parquet').to_pylist()
     chrg_doc = next(r for r in listed if r['filename'] == 'CHRG-118hhrg55555.pdf')
     assert [r['format'] for r in listed if r['filename'].startswith('CHRG-118hhrg55555.')] == ['html', 'pdf']
@@ -849,8 +865,8 @@ def test_phase2_entities_meetings_witnesses_recordings_and_spicy_projections(tmp
     assert print_doc['meeting_keys'] == ['115538']
     assert print_doc['measure_keys'] == ['115-hr-1']
     assert chrg_doc['document_date'] == date(2023, 5, 10)
-    assert chrg_doc['witness_keys'] == []
-    assert len(stmt_doc['witness_keys']) == 2
+    assert len(chrg_doc['witness_keys']) == 2
+    assert len(stmt_doc['witness_keys']) == 1
 
     # 2. Verify witnesses.parquet
     witnesses = pq.read_table(release_dir / 'witnesses.parquet').to_pylist()
@@ -858,14 +874,15 @@ def test_phase2_entities_meetings_witnesses_recordings_and_spicy_projections(tmp
     # Congress.gov list's Other Person, whom no higher source names, is shown.
     superseded = [w for w in witnesses if w['superseded_by']]
     assert sorted((w['source'], w['name']) for w in superseded) == [('mods', 'Dr. Jane Smith'), ('mods', 'Other Person')]
-    superseded_jane = next(w for w in superseded if w['name'] == 'Dr. Jane Smith')
     witnesses = [w for w in witnesses if not w['superseded_by']]
     assert len(witnesses) == 5
     meeting_witnesses = [w for w in witnesses if w['occasion'] == 'meeting:115538' and w['source'] == 'house_xml']
     assert [w['name'] for w in meeting_witnesses] == ['Dr. Jane Smith', 'Dr. Jane Smith Second Panel']
-    assert [w['name'] for w in witnesses if w['occasion'] == 'meeting:115538' and w['source'] == 'congress_gov'] == ['Other Person']
+    other_person = next(w for w in witnesses if w['occasion'] == 'meeting:115538' and w['source'] == 'congress_gov')
+    assert other_person['name'] == 'Other Person'
     assert meeting_witnesses[0]['witness_key'] != meeting_witnesses[1]['witness_key']
-    assert set(stmt_doc['witness_keys']) == {meeting_witnesses[0]['witness_key'], superseded_jane['witness_key']}
+    assert stmt_doc['witness_keys'] == [meeting_witnesses[0]['witness_key']]
+    assert set(chrg_doc['witness_keys']) == {meeting_witnesses[0]['witness_key'], other_person['witness_key']}
     by_occasion = {w['occasion']: w for w in witnesses if w['occasion'] != 'meeting:115538'}
     assert 'package:CHRG-118shrg77777' in by_occasion
     assert by_occasion['package:CHRG-118shrg77777']['bioguide_id'] == 'R000001'
@@ -936,9 +953,10 @@ def test_phase2_entities_meetings_witnesses_recordings_and_spicy_projections(tmp
                          'printed_entry', 'entry_label')),
     )]
 
-    # 6. Verify bills.parquet (referenced + related_bills vehicles, chained amendments, deduplicated votes, ordered activities)
+    # 6. Verify bills.parquet (referenced + unlisted_subjects retained + related_bills vehicles, unreferenced 118-hr-8888 excluded)
+    assert [u['subject_key'] for u in m['unlisted_subjects']] == ['118-hr-9999']
     bills = pq.read_table(release_dir / 'bills.parquet').to_pylist()
-    assert [b['bill_id'] for b in bills] == ['118-hr-1234', '118-hr-815']
+    assert [b['bill_id'] for b in bills] == ['118-hr-1234', '118-hr-815', '118-hr-9999']
     bill = bills[0]
     assert bill['public_law_number'] == '118-50'
     assert bill['cosponsor_count'] == 42
@@ -1037,6 +1055,9 @@ def test_phase2_entities_meetings_witnesses_recordings_and_spicy_projections(tmp
     assert [(r['event_id'], r['video_key'], r['status']) for r in matches if r['basis'] == 'video_states_event_id'] == [
         (115538, 'youtube:agHearing01', 'claimed')]
     assert not any(r['video_key'] == 'youtube:agUpload02' for r in matches)
+    recordings = {r['video_key']: r['event_ids'] for r in pq.read_table(tmp_path / 'release-explorer/recordings.parquet').to_pylist()}
+    assert recordings['youtube:agHearing01'] == [115538]
+    assert 'youtube:agUpload02' not in recordings
 
 
 def test_spicy_generations_pinned_by_publish_and_maintenance():
@@ -1874,23 +1895,7 @@ def test_zip_contents_are_the_documents_from_receipts_to_release(tmp_path):
         line('https://fixture.test/lone.zip', [dict(body(lone_zip), sniffed_format='zip')]),
         line('https://fixture.test/direct.pdf', [dict(body(direct), sniffed_format='pdf', intact=True)]),
     ]
-    receipt = raw / 'receipts/documents/2026-10-27/slice.jsonl.gz'
-    receipt.parent.mkdir(parents=True, exist_ok=True)
-    encoded = gzip.compress(''.join(json.dumps(r) + '\n' for r in lines).encode(), mtime=0)
-    receipt.write_bytes(encoded)
-    pin = tmp_path / 'pin.json'
-    pin.write_text(json.dumps(dict(path=str(receipt), size=len(encoded), sha256=hashlib.sha256(encoded).hexdigest(), producer='fixture creation')))
-    captures = stage_captures([dict(key=receipt.relative_to(raw).as_posix(), path=str(receipt), qualification=str(pin))], engine=engine, work=tmp_path / 'stage') / 'captures.parquet'
-    inventory = tmp_path / 'inventory'
-    inventory.mkdir()
-    run_job(inventory, engine, inputs=[dict(name='captures', kind='parquet', path=str(captures))], steps=[], outputs=[parquet_output(inventory, 'bodies',
-        """SELECT DISTINCT sha256 AS body_sha,'bodies/sha256/'||substr(encode(sha256,'hex'),1,2)||'/'||encode(sha256,'hex') AS physical_key,
-        'bodies/sha256/'||substr(encode(sha256,'hex'),1,2)||'/'||encode(sha256,'hex') AS relative_path,stored_bytes FROM captures WHERE sha256 IS NOT NULL""", ['body_sha'])])
-    pages = readings.stage(captures=captures, body_inventory=inventory / 'bodies.parquet', local_root=raw, engine=engine, work=tmp_path / 'read', decided_at='2026-10-27T12:00:00Z', parser='html')
-    names = filenames.stage(captures=captures, recovery_files=(), engine=engine, work=tmp_path / 'names', decided_at='2026-10-27T12:00:00Z')
-    build_release(captures=captures, readings=pages['readings'], filename_readings=names['readings'],
-        parser_versions={p: readings.current_version(p) for p in ['sniff', 'html', 'xml', 'json']}, catalog_version=names['catalog_version'],
-        engine=engine, output=tmp_path / 'release', scratch=tmp_path / 'model')
+    build_release(**_staged_lines(tmp_path, engine, raw, lines), engine=engine, output=tmp_path / 'release', scratch=tmp_path / 'model')
     release = tmp_path / 'release'
     rows = pq.read_table(release / 'list.parquet').to_pylist()
     formats = sorted(row['format'] for row in rows)
@@ -1940,30 +1945,25 @@ def test_imported_zip_identical_to_a_good_download_keeps_its_members(tmp_path):
             source_associations=[dict(original_url=page + '-original', basis='explicit_retained_download_wrapper')],
             captures=[entry(zipped, 'zip', expansion='expanded'), entry(member, 'pdf', intact=True, member_path=name)])
     lines = [direct, imported(url, data, pdf, 'A/one.pdf'), imported('https://fixture.test/unverified', other, orphan, 'B/two.pdf')]
-    receipt = raw / 'receipts/documents/2026-10-16/slice.jsonl.gz'
-    receipt.parent.mkdir(parents=True, exist_ok=True)
-    encoded = gzip.compress(''.join(json.dumps(r) + '\n' for r in lines).encode(), mtime=0)
-    receipt.write_bytes(encoded)
-    pin = tmp_path / 'pin.json'
-    pin.write_text(json.dumps(dict(path=str(receipt), size=len(encoded), sha256=hashlib.sha256(encoded).hexdigest(), producer='fixture creation')))
     decisions = tmp_path / 'recoveries.jsonl'
     decisions.write_text(''.join(json.dumps(dict(id=name, body_sha256=hashlib.sha256(content).hexdigest(), original_url=page + '-original', recovered_filename=None,
         recovered_url=page, kind='recovered_document', identity_note=None, decided_at='2026-10-16T00:00:00Z', supersedes=None, recovery_record_version=2)) + '\n'
         for name, content, page in (('one', data, url), ('two', other, 'https://fixture.test/unverified'))))
     recovery_files = [dict(key='provenance/recoveries/fixture.jsonl', path=str(decisions))]
-    captures = stage_captures([dict(key=receipt.relative_to(raw).as_posix(), path=str(receipt), qualification=str(pin))], engine=engine, work=tmp_path / 'stage') / 'captures.parquet'
-    modes = {(r['mode'], r['member_path']) for r in pq.read_table(captures, columns=['mode', 'member_path']).to_pylist()}
+    staged = _staged_lines(tmp_path, engine, raw, lines, day='2026-10-16', recovery_files=recovery_files)
+    modes = {(r['mode'], r['member_path']) for r in pq.read_table(staged['captures'], columns=['mode', 'member_path']).to_pylist()}
     assert ('retained_import', 'A/one.pdf') in modes, modes
-    inventory = tmp_path / 'inventory'
-    inventory.mkdir()
-    run_job(inventory, engine, inputs=[dict(name='captures', kind='parquet', path=str(captures))], steps=[], outputs=[parquet_output(inventory, 'bodies',
-        """SELECT DISTINCT sha256 AS body_sha,'bodies/sha256/'||substr(encode(sha256,'hex'),1,2)||'/'||encode(sha256,'hex') AS physical_key,
-        'bodies/sha256/'||substr(encode(sha256,'hex'),1,2)||'/'||encode(sha256,'hex') AS relative_path,stored_bytes FROM captures WHERE sha256 IS NOT NULL""", ['body_sha'])])
-    pages = readings.stage(captures=captures, body_inventory=inventory / 'bodies.parquet', local_root=raw, engine=engine, work=tmp_path / 'read', decided_at='2026-10-27T12:00:00Z', parser='html')
-    names = filenames.stage(captures=captures, recovery_files=recovery_files, engine=engine, work=tmp_path / 'names', decided_at='2026-10-27T12:00:00Z')
-    build_release(captures=captures, readings=pages['readings'], filename_readings=names['readings'], recovery_files=recovery_files,
-        parser_versions={p: readings.current_version(p) for p in ['sniff', 'html', 'xml', 'json']}, catalog_version=names['catalog_version'],
-        engine=engine, output=tmp_path / 'release', scratch=tmp_path / 'model')
+    # The unverified import's ZIP and its member are two recovered files of one dead link, whose text the model
+    # cannot read: a review must name them before the build publishes (ct-u9y4 item 4).
+    from viewer_publication.archive_model_profile import ROOT, _definition_hashes
+    root = tmp_path / 'root'
+    for relative in _definition_hashes(ROOT):
+        (root / relative).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / relative, root / relative)
+    roles = root / 'model/registries/recovered-file-roles.json'
+    roles.write_text(json.dumps(json.loads(roles.read_text()) + [dict(original_url='https://fixture.test/unverified-original',
+        body_sha=hashlib.sha256(content).hexdigest(), role='undecided', evidence='fixture') for content in (other, orphan)]))
+    build_release(**staged, recovery_files=recovery_files, engine=engine, output=tmp_path / 'release', scratch=tmp_path / 'model', root=root)
     release = tmp_path / 'release'
     details = pq.read_table(release / 'detail.parquet').to_pylist()
     bodies = {d['saved_body'] for d in details}
@@ -1978,49 +1978,38 @@ def test_imported_zip_identical_to_a_good_download_keeps_its_members(tmp_path):
     assert [r['list_row'] for r in pq.read_table(release / 'urls.parquet').to_pylist() if r['lookup_key'] == lookup] == [member]
 
 
-def _govinfo_release(tmp_path, packages):
-    """Receipt lines for GovInfo packages through captures, html readings and the model.
+def _stored(raw, data, fmt, **extra):
+    """One capture entry whose body is stored uncompressed under `raw` (a PDF is intact)."""
+    digest = hashlib.sha256(data).hexdigest()
+    path = raw / f'bodies/sha256/{digest[:2]}/{digest}'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return dict(sha256=digest, bytes=len(data), media_type='application/octet-stream', fidelity='exact-bytes', stored_suffix='',
+        stored_bytes=len(data), stored_md5=hashlib.md5(data).hexdigest(), sniff_version=readings.current_version('sniff'),
+        sniffed_format=fmt, **({'intact': True} if fmt == 'pdf' else {}), **extra)
 
-    Each package: a details page linking the PDF, the HTML and the ZIP each in its own
-    `li`; direct HTML bodies; a ZIP holding P/html/P.htm and P/pdf/P.pdf; the direct PDF
-    with the member PDF's bytes.
-    """
-    from viewer_publication.archive_model import build_release
+
+def _fetched(url, entries, requested_url=None):
+    """One good fetch line answered at `url`."""
+    return dict(writer=dict(job='fixture', commit='a' * 40), run_id='fixture', mode='fetch', family='documents', outcome='stored',
+        requested_url=requested_url or url, url=url, response_headers={}, http_status=200, complete=True,
+        retrieved_at='2026-10-27T12:00:00Z', captures=entries)
+
+
+def _govinfo_zip(package, member_html, pdf):
+    """A GovInfo package ZIP holding P/html/P.htm and P/pdf/P.pdf."""
     import io, zipfile
-    engine = NativeDatasets.from_config(os.environ['DOCSPEC_JOB_CONFIG'])
-    raw = tmp_path / 'raw'
-    def body(data, fmt, **extra):
-        digest = hashlib.sha256(data).hexdigest()
-        path = raw / f'bodies/sha256/{digest[:2]}/{digest}'
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
-        return dict(sha256=digest, bytes=len(data), media_type='application/octet-stream', fidelity='exact-bytes', stored_suffix='',
-            stored_bytes=len(data), stored_md5=hashlib.md5(data).hexdigest(), sniff_version=readings.current_version('sniff'),
-            sniffed_format=fmt, **({'intact': True} if fmt == 'pdf' else {}), **extra)
-    def line(url, entries, context=None):
-        return dict(writer=dict(job='fixture', commit='a' * 40), run_id='fixture', mode='fetch', family='documents', outcome='stored',
-            requested_url=url, url=url, response_headers={}, http_status=200, complete=True, retrieved_at='2026-10-27T12:00:00Z',
-            captures=entries)
-    lines, bodies = [], {}
-    for package, (direct_htmls, member_html) in packages.items():
-        base = f'https://www.govinfo.gov/content/pkg/{package}'
-        pdf = f'%PDF-1.7\n{package} transcript\n%%EOF\n'.encode()
-        buffer = io.BytesIO()
-        with zipfile.ZipFile(buffer, 'w') as archive:
-            archive.writestr(f'{package}/html/{package}.htm', member_html)
-            archive.writestr(f'{package}/pdf/{package}.pdf', pdf)
-        zip_bytes = buffer.getvalue()
-        details = (f'<html><head><title>{package} details</title></head><body><ul>'
-                   f'<li><a href="{base}/pdf/{package}.pdf">PDF</a></li><li><a href="{base}/html/{package}.htm">Text</a></li>'
-                   f'<li><a href="{base}.zip">ZIP</a></li></ul></body></html>').encode()
-        bodies[package] = dict(pdf=pdf, zip=zip_bytes, member=member_html, direct=direct_htmls)
-        lines.append(line(f'https://www.govinfo.gov/app/details/{package}', [body(details, 'html')]))
-        lines.extend(line(f'{base}/html/{package}.htm', [body(data, 'html')]) for data in direct_htmls)
-        lines.append(line(f'{base}/pdf/{package}.pdf', [body(pdf, 'pdf')]))
-        lines.append(line(f'{base}.zip', [body(zip_bytes, 'zip', expansion='expanded'),
-            body(member_html, 'html', member_path=f'{package}/html/{package}.htm'),
-            body(pdf, 'pdf', member_path=f'{package}/pdf/{package}.pdf')]))
-    receipt = raw / 'receipts/documents/2026-10-27/slice.jsonl.gz'
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, 'w') as archive:
+        archive.writestr(f'{package}/html/{package}.htm', member_html)
+        archive.writestr(f'{package}/pdf/{package}.pdf', pdf)
+    return buffer.getvalue()
+
+
+def _staged_lines(tmp_path, engine, raw, lines, *, day='2026-10-27', recovery_files=()):
+    """Receipt lines, their bodies already under `raw`, through captures, html readings and
+    filenames: the capture inputs and pins build_release takes."""
+    receipt = raw / f'receipts/documents/{day}/slice.jsonl.gz'
     receipt.parent.mkdir(parents=True, exist_ok=True)
     encoded = gzip.compress(''.join(json.dumps(r) + '\n' for r in lines).encode(), mtime=0)
     receipt.write_bytes(encoded)
@@ -2033,10 +2022,37 @@ def _govinfo_release(tmp_path, packages):
         """SELECT DISTINCT sha256 AS body_sha,'bodies/sha256/'||substr(encode(sha256,'hex'),1,2)||'/'||encode(sha256,'hex') AS physical_key,
         'bodies/sha256/'||substr(encode(sha256,'hex'),1,2)||'/'||encode(sha256,'hex') AS relative_path,stored_bytes FROM captures WHERE sha256 IS NOT NULL""", ['body_sha'])])
     pages = readings.stage(captures=captures, body_inventory=inventory / 'bodies.parquet', local_root=raw, engine=engine, work=tmp_path / 'read', decided_at='2026-10-27T12:00:00Z', parser='html')
-    names = filenames.stage(captures=captures, recovery_files=(), engine=engine, work=tmp_path / 'names', decided_at='2026-10-27T12:00:00Z')
-    build_release(captures=captures, readings=pages['readings'], filename_readings=names['readings'],
-        parser_versions={p: readings.current_version(p) for p in ['sniff', 'html', 'xml', 'json']}, catalog_version=names['catalog_version'],
-        engine=engine, output=tmp_path / 'release', scratch=tmp_path / 'model')
+    names = filenames.stage(captures=captures, recovery_files=recovery_files, engine=engine, work=tmp_path / 'names', decided_at='2026-10-27T12:00:00Z')
+    return dict(captures=captures, readings=pages['readings'], filename_readings=names['readings'],
+        parser_versions={p: readings.current_version(p) for p in ['sniff', 'html', 'xml', 'json']}, catalog_version=names['catalog_version'])
+
+
+def _govinfo_release(tmp_path, packages):
+    """Receipt lines for GovInfo packages through captures, html readings and the model.
+
+    Each package: a details page linking the PDF, the HTML and the ZIP each in its own
+    `li`; direct HTML bodies; a ZIP holding P/html/P.htm and P/pdf/P.pdf; the direct PDF
+    with the member PDF's bytes.
+    """
+    from viewer_publication.archive_model import build_release
+    engine = NativeDatasets.from_config(os.environ['DOCSPEC_JOB_CONFIG'])
+    raw = tmp_path / 'raw'
+    lines, bodies = [], {}
+    for package, (direct_htmls, member_html) in packages.items():
+        base = f'https://www.govinfo.gov/content/pkg/{package}'
+        pdf = f'%PDF-1.7\n{package} transcript\n%%EOF\n'.encode()
+        zip_bytes = _govinfo_zip(package, member_html, pdf)
+        details = (f'<html><head><title>{package} details</title></head><body><ul>'
+                   f'<li><a href="{base}/pdf/{package}.pdf">PDF</a></li><li><a href="{base}/html/{package}.htm">Text</a></li>'
+                   f'<li><a href="{base}.zip">ZIP</a></li></ul></body></html>').encode()
+        bodies[package] = dict(pdf=pdf, zip=zip_bytes, member=member_html, direct=direct_htmls)
+        lines.append(_fetched(f'https://www.govinfo.gov/app/details/{package}', [_stored(raw, details, 'html')]))
+        lines.extend(_fetched(f'{base}/html/{package}.htm', [_stored(raw, data, 'html')]) for data in direct_htmls)
+        lines.append(_fetched(f'{base}/pdf/{package}.pdf', [_stored(raw, pdf, 'pdf')]))
+        lines.append(_fetched(f'{base}.zip', [_stored(raw, zip_bytes, 'zip', expansion='expanded'),
+            _stored(raw, member_html, 'html', member_path=f'{package}/html/{package}.htm'),
+            _stored(raw, pdf, 'pdf', member_path=f'{package}/pdf/{package}.pdf')]))
+    build_release(**_staged_lines(tmp_path, engine, raw, lines), engine=engine, output=tmp_path / 'release', scratch=tmp_path / 'model')
     release = tmp_path / 'release'
     return bodies, {name: pq.read_table(release / f'{name}.parquet').to_pylist() for name in ('list', 'detail', 'links', 'sources')}
 
@@ -2105,10 +2121,325 @@ def test_a_page_never_groups_itself_through_its_own_navigation_links(tmp_path):
     assert len(rows) == 2
 
 
+def test_a_page_listed_beside_a_file_is_not_one_of_its_formats(tmp_path):
+    """ct-h3jb (candidate a70ebc3d1466): each Financial Services event page has a table row with a
+    "here" link to that hearing's PDF and a "Full Committee" link to one listing page. The listing
+    page became every PDF's HTML version, so seven PDFs were one document and six could not be
+    opened. Files a publisher lists together are one document only when they also share a name.
+    The real listing page (/events/default.aspx) is site furniture since ct-xj8s, never a document, so
+    a listing page the furniture list does not name stands in for it here."""
+    from viewer_publication.archive_model import build_release
+    engine = NativeDatasets.from_config(os.environ['DOCSPEC_JOB_CONFIG'])
+    site = 'https://democrats-financialservices.house.gov'
+    listing_url = f'{site}/news/documentquery.aspx?DocumentTypeID=27'
+    words = 'The committee considers legislation and holds hearings on housing and insurance. ' * 30
+    listing = (f'<html><head><title>Committee Events</title></head><body><main><p>{words}</p></main></body></html>').encode()
+    dates = ['20260604', '20260714', '20260915']
+    pdf_urls = [f'https://docs.house.gov/meetings/BA/BA00/{d}/1193{i}/HHRG-119-BA00-{d}-SD002.pdf' for i, d in enumerate(dates)]
+    pdfs = [f'%PDF-1.7\nMinority views for the hearing of {d}\n%%EOF\n'.encode() for d in dates]
+    events = [(f'{site}/events/eventsingle.aspx?EventID=41533{i}',
+               (f'<html><head><title>Hearing of {d}</title></head><body><main><p>Hearing {d}. {words}</p><table><tr><td>'
+                f'<a href="{listing_url}">Full Committee</a> Read the minority views <a href="{pdf_url}">here</a>'
+                f'</td></tr></table></main></body></html>').encode())
+              for i, (d, pdf_url) in enumerate(zip(dates, pdf_urls))]
+    # One bill text in two formats under one name, listed in one row: these are one document.
+    bill = 'https://www.congress.gov/117/bills/hr5376'
+    bill_pdf, bill_html = b'%PDF-1.7\nH.R. 5376 engrossed amendment Senate\n%%EOF\n', (
+        f'<html><head><title>H.R. 5376</title></head><body><pre>{"An Act to provide for reconciliation. " * 40}</pre></body></html>').encode()
+    floor = (f'<html><head><title>Bills This Week</title></head><body><main><p>{words}</p><table><tr><td>'
+             f'<a href="{bill}/BILLS-117hr5376eas.pdf">PDF</a> <a href="{bill}/generated/BILLS-117hr5376eas.html">HTML</a>'
+             f'</td></tr></table></main></body></html>').encode()
+    staged = _stage_raw_fixture(tmp_path, engine, [
+        dict(url=listing_url, data=listing, format='html'),
+        *[dict(url=url, data=data, format='html') for url, data in events],
+        *[dict(url=url, data=data, format='pdf', compress=False) for url, data in zip(pdf_urls, pdfs)],
+        dict(url='https://docs.house.gov/floor/Default.aspx', data=floor, format='html'),
+        dict(url=f'{bill}/BILLS-117hr5376eas.pdf', data=bill_pdf, format='pdf', compress=False),
+        dict(url=f'{bill}/generated/BILLS-117hr5376eas.html', data=bill_html, format='html')])
+    build_release(captures=staged['captures'], readings=staged['readings'], filename_readings=staged['filename_readings'],
+        parser_versions={p: staged['parser_versions'][p] for p in ['sniff', 'html', 'xml', 'json']},
+        catalog_version=staged['catalog_version'], engine=engine, output=tmp_path / 'release', scratch=tmp_path / 'model')
+    details = pq.read_table(tmp_path / 'release/detail.parquet').to_pylist()
+    links = {row['link_key']: row['list_row'] for row in pq.read_table(tmp_path / 'release/links.parquet').to_pylist()}
+    key = lambda data: hashlib.sha256(data).digest()[:8]
+    pdf_rows = [links[key(data)] for data in pdfs]
+    assert len(set(pdf_rows)) == 3 and links[key(listing)] not in pdf_rows
+    for row, data, url in zip(pdf_rows, pdfs, pdf_urls):
+        saved = details[row]
+        # Each link key answers its own file, with no page as its HTML version or its title.
+        assert saved['saved_body'] == hashlib.sha256(data).digest() and saved['filename'] == url.rsplit('/', 1)[1]
+        assert not saved['alternates'] and saved['title'] != 'Committee Events'
+    both = details[links[key(bill_pdf)]]
+    assert links[key(bill_html)] == links[key(bill_pdf)]
+    assert both['format'] == 'pdf' and [a['format'] for a in both['alternates']] == ['html']
+
+
+def test_a_sites_help_page_is_not_a_document_of_the_meetings_that_link_it(tmp_path):
+    """ct-aoxp (release 619db5f9e08e): every House Committee Repository page carries a "Help" link in its
+    chrome, including the error page the site serves at a missing meeting file's address. The capture
+    job followed it, the help page became a document, and each error page's address gave it that
+    address's meeting: one document of 81 meetings. A site's help page is furniture, never a document."""
+    from viewer_publication.archive_model import build_release
+    engine = NativeDatasets.from_config(os.environ['DOCSPEC_JOB_CONFIG'])
+    site = 'https://docs.house.gov'
+    help_url = f'{site}/committee/Help.aspx'
+    words = 'The committee will receive testimony on farm programs and rural development. ' * 30
+    chrome = f'<div id="footer"><a href="/committee/Help.aspx">Help</a></div>'
+    help_page = (f'<html><head><title>Help | Committee Repository | U.S. House of Representatives</title></head><body><main>'
+                 f'<p>{"This site holds committee documents. Use the calendar to find a meeting. " * 30}</p></main>{chrome}</body></html>').encode()
+    folder = f'{site}/meetings/AG/AG00/20260604/119301'
+    pdf_url, missing_url = f'{folder}/HHRG-119-AG00-Wstate-DoeJ-20260604.pdf', f'{folder}/HHRG-119-AG00-20260604-SD001.pdf'
+    pdf = b'%PDF-1.7\nStatement of Jane Doe on farm programs\n%%EOF\n'
+    event_url = f'{site}/Committee/Calendar/ByEvent.aspx?EventID=119301'
+    event = (f'<html><head><title>Hearing: Farm Programs | Committee Repository</title></head><body><main><p>{words}</p>'
+             f'<ul><li><a href="{pdf_url}">PDF</a></li></ul></main>{chrome}</body></html>').encode()
+    error_url = f'{site}/committee/Error/Error.aspx?Code=404'
+    error = (f'<html><head><title>Error | Committee Repository</title></head><body><main><p>{"The document you requested could not be found. " * 30}'
+             f'</p></main>{chrome}</body></html>').encode()
+    staged = _stage_raw_fixture(tmp_path, engine, [
+        dict(url=event_url, data=event, format='html'),
+        dict(url=pdf_url, data=pdf, format='pdf', compress=False),
+        dict(url=error_url, requested_url=missing_url, context_url=missing_url, data=error, format='html'),
+        dict(url=help_url, data=help_page, format='html')])
+    build_release(captures=staged['captures'], readings=staged['readings'], filename_readings=staged['filename_readings'],
+        parser_versions={p: staged['parser_versions'][p] for p in ['sniff', 'html', 'xml', 'json']},
+        catalog_version=staged['catalog_version'], engine=engine, output=tmp_path / 'release', scratch=tmp_path / 'model')
+    details = pq.read_table(tmp_path / 'release/detail.parquet').to_pylist()
+    links = {row['link_key'] for row in pq.read_table(tmp_path / 'release/links.parquet').to_pylist()}
+    addresses = {row['url'] for row in pq.read_table(tmp_path / 'release/sources.parquet').to_pylist()}
+    # The meeting page and the statement are the documents; the statement keeps its meeting.
+    assert sorted(row['filename'] for row in details) == ['ByEvent.aspx', 'HHRG-119-AG00-Wstate-DoeJ-20260604.pdf']
+    assert next(row for row in details if row['format'] == 'pdf')['meeting_keys'] == ['119301']
+    assert hashlib.sha256(help_page).digest()[:8] not in links and help_url not in addresses
+
+
+GOVINFO = 'https://www.govinfo.gov'
+LANDED, TEXT_ONLY, PARTS = 'CHRG-119hhrg7', 'CHRG-119shrg8', 'CHRG-119hhrg9'
+
+
+def _landing_page(name, title, links):
+    """A GovInfo Content Details page (release 619db5f9e08e shape): site navigation, the package's title
+    and links to its files; about 3 KB of text, far below the listing share of link text."""
+    nav = 'Skip to main content Browse A to Z Category Date Committee Author About Policies Authentication Help Developers'
+    items = ''.join(f'<li><a href="{href}">{text}</a></li>' for href, text in links)
+    return (f'<html><head><title>{title} - {name} | Content Details | GovInfo</title></head><body><header>{nav}</header>'
+            f'<main><h1>Content Details</h1><p>{"Share this page. Metadata, summary and related documents for this publication. " * 5}</p>'
+            f'<ul>{items}</ul></main></body></html>').encode()
+
+
+def _landing_fixture(tmp_path, engine):
+    """Three GovInfo hearings, each with its Content Details page, as raw receipt lines.
+
+    LANDED: a ZIP of its PDF and HTML text, the direct PDF, and another site's different copy of
+    the PDF under the same GovInfo name; its page links the ZIP. TEXT_ONLY: the .htm alone, its page
+    requested at GPO's retired search address and answered at GovInfo's (the CHRG-113hhrg85449
+    shape). PARTS: a
+    multi-part package with no package-level file, so its package page names no saved file; each of
+    its two parts has its own granule page (the CHRG-115hhrg24725 shape)."""
+    raw = tmp_path / 'raw'
+    pdf = f'%PDF-1.7\n{LANDED} transcript\n%%EOF\n'.encode()
+    other = f'%PDF-1.7\n{LANDED} transcript as the committee posted it\n%%EOF\n'.encode()
+    member, text_only = _transcript_html(7, 'clerk@mail.house.gov'), _transcript_html(8, 'clerk@mail.senate.gov')
+    parts = [f'%PDF-1.7\n{PARTS} part {n}\n%%EOF\n'.encode() for n in (1, 2)]
+    zip_bytes = _govinfo_zip(LANDED, member, pdf)
+    content = f'{GOVINFO}/content/pkg'
+    pages = {
+        f'{GOVINFO}/app/details/{LANDED}': _landing_page(LANDED, 'Serial No. 119-7 - FARM PROGRAMS', [(f'{content}/{LANDED}.zip', 'ZIP')]),
+        f'{GOVINFO}/app/details/{TEXT_ONLY}': _landing_page(TEXT_ONLY, 'S. Hrg. 119-8 - RURAL ROADS', [(f'{content}/{TEXT_ONLY}/html/{TEXT_ONLY}.htm', 'Text')]),
+        f'{GOVINFO}/app/details/{PARTS}': _landing_page(PARTS, 'Serial No. 119-9 - PUBLIC LANDS',
+                                                        [(f'{GOVINFO}/app/details/{PARTS}/{PARTS}-pt{n}', f'Part {n}') for n in (1, 2)]),
+        **{f'{GOVINFO}/app/details/{PARTS}/{PARTS}-pt{n}': _landing_page(f'{PARTS}-pt{n}', f'Serial No. 119-9, Part {n} - PUBLIC LANDS',
+                                                                         [(f'{content}/{PARTS}/pdf/{PARTS}-pt{n}.pdf', 'PDF')]) for n in (1, 2)}}
+    retired_search = f'http://www.gpo.gov/fdsys/search/pagedetails.action?packageId={TEXT_ONLY}'
+    lines = [_fetched(url, [_stored(raw, data, 'html')], requested_url=retired_search if TEXT_ONLY in url else None)
+             for url, data in pages.items()]
+    lines += [
+        _fetched(f'{content}/{LANDED}.zip', [_stored(raw, zip_bytes, 'zip', expansion='expanded'),
+            _stored(raw, member, 'html', member_path=f'{LANDED}/html/{LANDED}.htm'), _stored(raw, pdf, 'pdf', member_path=f'{LANDED}/pdf/{LANDED}.pdf')]),
+        _fetched(f'{content}/{LANDED}/pdf/{LANDED}.pdf', [_stored(raw, pdf, 'pdf')]),
+        _fetched(f'https://www.indian.senate.gov/wp-content/uploads/documents/{LANDED}.pdf', [_stored(raw, other, 'pdf')]),
+        _fetched(f'{content}/{TEXT_ONLY}/html/{TEXT_ONLY}.htm', [_stored(raw, text_only, 'html')]),
+        *[_fetched(f'{content}/{PARTS}/pdf/{PARTS}-pt{n}.pdf', [_stored(raw, data, 'pdf')]) for n, data in zip((1, 2), parts)]]
+    files = dict(pdf=pdf, other=other, member=member, text_only=text_only, part=parts[0], part2=parts[1])
+    return _staged_lines(tmp_path, engine, raw, lines), pages, files, retired_search
+
+
+def _lookup_key(url):
+    """Data model §8.2 lookup key: scheme, a leading www. and one trailing slash dropped."""
+    spelled = re.sub(r'^[a-z]+://(www[.])?', '', url).rstrip('/')
+    return hashlib.sha256(b'lookup:' + spelled.encode()).digest()[:8]
+
+
+def test_a_govinfo_landing_page_is_another_address_of_the_hearing_it_names(tmp_path):
+    """ct-m878 (release 619db5f9e08e): 34,826 GovInfo Content Details pages were documents beside the
+    hearing file they describe: no hearing text, about 3 KB of site navigation. Owner, 2026-11-10: fold
+    in, no redirect. The page is a wrapper. Its address and lookup keys answer the document named for
+    it, as a ZIP's address stays on its contents: the PDF before the HTML text, the .htm when it is the
+    only file, and the package's own copy, which the page links, before another site's copy under the
+    same name. Its link key retires with the ordinary notice, which lists that document. Owner,
+    2026-11-11 (ct-egoo): a package page that names no saved file is an address of each of its parts
+    (the documents its granule pages took), so its notice and lookup key list them. Built twice from
+    one capture set: without the rule (as published) and with it, against the first as the live
+    release; the publish gate passes."""
+    from viewer_publication.archive_model import build_release
+    from viewer_publication.archive_model_profile import ROOT, _definition_hashes
+    from viewer_publication.release_comparison import compare
+    from viewer_publication.release_gate import prior_links
+    engine = NativeDatasets.from_config(os.environ['DOCSPEC_JOB_CONFIG'])
+    staged, pages, files, retired_search = _landing_fixture(tmp_path, engine)
+    before_root = tmp_path / 'before-root'
+    for relative in _definition_hashes(ROOT):
+        (before_root / relative).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / relative, before_root / relative)
+    signals = before_root / 'model/registries/page-signals.json'
+    signals.write_text(json.dumps([r for r in json.loads(signals.read_text()) if r['kind'] != 'landing_url'], indent=2))
+    build_release(**staged, engine=engine, output=tmp_path / 'before', scratch=tmp_path / 'before-model', root=before_root)
+    prior, retired = prior_links(tmp_path / 'before', [], tmp_path / 'ledger')
+    build_release(**staged, engine=engine, output=tmp_path / 'after', scratch=tmp_path / 'after-model', prior_links=prior, base_retired=retired)
+    read = lambda side, name: pq.read_table(tmp_path / side / f'{name}.parquet').to_pylist()
+    key = lambda data: hashlib.sha256(data).digest()[:8]
+    landing_keys = {key(data) for data in pages.values()}
+    before, after = read('before', 'detail'), read('after', 'detail')
+    # As published, each page was a document saved at its own address.
+    assert sorted(s['url'] for s in read('before', 'sources') if s['is_saved'] and '/app/details/' in s['url']) == sorted(pages)
+    # No row is saved at a details address; every hearing keeps its files; only the pages leave.
+    sources = read('after', 'sources')
+    assert not [s for s in sources if s['is_saved'] and '/app/details/' in s['url']]
+    held = lambda rows: sorted((d['saved_body'], tuple(a['body'] for a in d['alternates'])) for d in rows)
+    assert held(after) == held(d for d in before if d['link_key'] not in landing_keys) and len(after) == len(before) - 5
+    row_of = lambda data: next(i for i, d in enumerate(after) if d['saved_body'] == hashlib.sha256(data).digest())
+    hearing, text_only, part, part2 = (row_of(files[name]) for name in ('pdf', 'text_only', 'part', 'part2'))
+    assert [a['format'] for a in after[hearing]['alternates']] == ['html'] and row_of(files['other']) != hearing
+    # Each page's address is an unsaved address of the document named for it, never of another site's copy;
+    # the package page's, which names no saved file, of each of its parts.
+    package = f'{GOVINFO}/app/details/{PARTS}'
+    landed = {url: [hearing] for url in pages if url.endswith(LANDED)} | {url: [text_only] for url in pages if url.endswith(TEXT_ONLY)}
+    landed |= {f'{package}/{PARTS}-pt1': [part], f'{package}/{PARTS}-pt2': [part2], package: sorted([part, part2])}
+    assert sorted((s['url'], s['list_row']) for s in sources if '/app/details/' in s['url']) == sorted(
+        (url, row) for url, rows in landed.items() for row in rows)
+    # Its lookup keys, the retired GPO request included, answer those rows alone.
+    urls = read('after', 'urls')
+    for url, rows in [*landed.items(), (retired_search, [text_only])]:
+        assert sorted(u['list_row'] for u in urls if u['lookup_key'] == _lookup_key(url)) == rows, url
+    # Each page's link key retires with the ordinary notice: no successor, the documents at its address listed.
+    assert not landing_keys & {k['link_key'] for k in read('after', 'links')}
+    notices = {r['link_key']: (r['successor_key'], r['address_versions']) for r in read('after', 'retired_links')}
+    assert notices == {key(pages[url]): (None, sorted(after[row]['link_key'] for row in rows)) for url, rows in landed.items()}
+    reports = {q['name']: q['data'] for q in json.loads((tmp_path / 'after-model/result.json').read_text())['queries']}
+    assert reports['unplaced_landing_pages'] == []
+    assert reports['landing_page_invariants'] == [dict(saved_landing_addresses=0, unaddressed_landing_pages=0, lost_landing_addresses=0)]
+    # The publish gate's link rule: no key vanishes, and no live key, lookup key or address answers another file.
+    rule = compare(tmp_path / 'before', tmp_path / 'after')['link_rule']
+    assert rule['ok'], rule
+
+
+@pytest.mark.parametrize('sql, sound, broken, invariant, count', [
+    # The role rule lost: every page stays a document saved at its details address.
+    ('locator-signals.sql', "IN ('wrapper_url', 'landing_url')", "IN ('wrapper_url')", 'saved_landing_addresses', 5),
+    # The fold lost: the four pages that name a saved file, and the package page on each of its two parts,
+    # leave no address on the document.
+    ('document-addresses.sql', 'FROM landing_pages l', 'FROM (SELECT * FROM landing_pages WHERE false) l', 'unaddressed_landing_pages', 6),
+    # A page the fold never admits (here: its role is not exactly wrapper, as when a source mixes roles) is
+    # neither a document nor a landing page: all five addresses vanish, which unaddressed_landing_pages,
+    # starting from landing_pages, cannot see (review finding 3, 2026-11-10).
+    ('landing-page-files.sql', "m.record_role='wrapper'", "m.record_role='wrapper-never'", 'lost_landing_addresses', 5)])
+def test_a_lost_landing_rule_refuses_the_build(tmp_path, sql, sound, broken, invariant, count):
+    """Planted defects for the three landing-page invariants (ct-m878): each refuses before the manifest."""
+    from viewer_publication.archive_model import build_release
+    from viewer_publication.archive_model_profile import ROOT, _definition_hashes
+    engine = NativeDatasets.from_config(os.environ['DOCSPEC_JOB_CONFIG'])
+    staged = _landing_fixture(tmp_path, engine)[0]
+    root = tmp_path / 'broken-root'
+    for relative in _definition_hashes(ROOT):
+        (root / relative).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / relative, root / relative)
+    path = root / 'model/sql' / sql
+    assert path.read_text().count(sound) == 1
+    path.write_text(path.read_text().replace(sound, broken))
+    with pytest.raises(ValueError, match='Release key invariant failed'):
+        build_release(**staged, engine=engine, output=tmp_path / 'release', scratch=tmp_path / 'model', root=root)
+    reports = {q['name']: q['data'] for q in json.loads((tmp_path / 'model/result.json').read_text())['queries']}
+    assert reports['landing_page_invariants'][0][invariant] == count
+
+
+def test_a_details_sub_page_that_is_no_govinfo_id_names_no_file_and_is_counted(tmp_path):
+    """Review finding 3 (2026-11-10): the landing rule accepts any path under /app/details/ and matches a
+    page's last segment to any host's file stem, so a sub-page that is no package or granule ID would attach
+    to an unrelated summary.pdf. Its stem must be a GovInfo ID (page signals govinfo_details_name). Such a
+    page then is neither a document nor a landing page: lost_landing_addresses counts its address. An error
+    page or an unread page at a details address is not counted."""
+    from congress_api.lake.model_sql import model_steps
+    from congress_api.retention.provenance import json_input
+    from viewer_publication.archive_model import LANDING_PAGE_INVARIANTS, registry_inputs
+    package = f'{GOVINFO}/app/details/{LANDED}'
+    members = [
+        dict(component='page', source_id='page', body_sha='1' * 64, source_url=package, filename=LANDED, record_role='wrapper', is_real_file=False, format='html'),
+        dict(component='sub', source_id='sub', body_sha='2' * 64, source_url=f'{package}/summary', filename='summary', record_role='wrapper', is_real_file=False, format='html'),
+        dict(component='hearing', source_id='pdf', body_sha='3' * 64, source_url=f'{GOVINFO}/content/pkg/{LANDED}/pdf/{LANDED}.pdf', filename=f'{LANDED}.pdf', record_role='document', is_real_file=True, format='pdf'),
+        dict(component='summary', source_id='other', body_sha='4' * 64, source_url='https://committee.house.gov/files/summary.pdf', filename='summary.pdf', record_role='document', is_real_file=True, format='pdf'),
+        # An error page or an unread page at a details address is no landing page by the general role rules
+        # (url_state and the reading counts see those), so its address is not lost to the fold.
+        dict(component='error', source_id='error', body_sha='5' * 64, source_url=f'{GOVINFO}/app/details/{TEXT_ONLY}', filename=TEXT_ONLY, record_role='error_response', is_real_file=False, format='html'),
+        dict(component='unread', source_id='unread', body_sha='6' * 64, source_url=f'{GOVINFO}/app/details/{PARTS}', filename=PARTS, record_role=None, is_real_file=False, format='html')]
+    for row in members:
+        row['first_fetched'] = '2026-10-01T12:00:00Z'
+    strings = dict(component='Utf8', source_id='Utf8', body_sha='Utf8', source_url='Utf8', filename='Utf8', record_role='Utf8', format='Utf8')
+    inputs = [i for i in registry_inputs(tmp_path / 'registries') if i['name'] in ('page_signals', 'formats')] + [
+        json_input(tmp_path, 'members', members, is_real_file='Boolean', first_fetched='Utf8', **strings),
+        json_input(tmp_path, 'publisher_links', [], page_body='Utf8', source_id='Utf8'),
+        json_input(tmp_path, 'capture_source_contexts', [dict(source_id='page', context_url=package, outcome='stored')],
+                   source_id='Utf8', context_url='Utf8', outcome='Utf8'),
+        json_input(tmp_path, 'document_identities', [dict(document_id=c, component=c) for c in ('hearing', 'summary')],
+                   document_id='Utf8', component='Utf8'),
+        # Published rows: each real file saved at its address, the package page an unsaved address of the hearing.
+        json_input(tmp_path, 'source_rows', [dict(doc_key='hearing', url=members[2]['source_url'], is_saved=True, member_path=None),
+            dict(doc_key='summary', url=members[3]['source_url'], is_saved=True, member_path=None),
+            dict(doc_key='hearing', url=package, is_saved=False, member_path=None)],
+            doc_key='Utf8', url='Utf8', is_saved='Boolean', member_path='Utf8')]
+    steps = [dict(name='document_members', sql="SELECT * EXCLUDE(first_fetched),cast(first_fetched AS TIMESTAMP WITH TIME ZONE) AS first_fetched FROM members"),
+             *model_steps(['landing-pages'], provided={'document_members', 'publisher_links', 'page_signals', 'formats'}, materialize=True)]
+    result = run_job(tmp_path / 'job', NativeDatasets.from_config(os.environ['DOCSPEC_JOB_CONFIG']), inputs=inputs, steps=steps, outputs=[],
+                     queries=[dict(name='files', sql='SELECT page_id,source_id FROM landing_page_files ORDER BY 1,2'),
+                              dict(name='pages', sql='SELECT source_id,component FROM landing_pages ORDER BY 1'), LANDING_PAGE_INVARIANTS])
+    assert result['files'] == [dict(page_id='page', source_id='pdf')]
+    assert result['pages'] == [dict(source_id='page', component='hearing')]
+    assert result['landing_page_invariants'] == [dict(saved_landing_addresses=0, unaddressed_landing_pages=0, lost_landing_addresses=1)]
+
+
+def test_a_committee_transcript_that_is_a_printed_hearing_is_tagged_as_one(tmp_path):
+    """ct-isnv (owner, 2026-11-11: filter the transcript words together, and label each document as what
+    it is). Committees post GPO's printed hearing under their own transcript label (release 77673bfb8fcf:
+    17 such, House Veterans' Affairs and Energy and Commerce). A document a committee calls a transcript
+    whose own text opens with a printed hearing's cover (page signals kind print_cover: the hearing number
+    and the GPO imprint) is that printed hearing: kind and family published-hearing. A court reporter's
+    transcript, with neither, stays a transcript."""
+    from viewer_publication.archive_model import build_release
+    engine = NativeDatasets.from_config(os.environ['DOCSPEC_JOB_CONFIG'])
+    site = 'http://veterans.house.gov/hearing-transcript'  # the committee's pages, as published (77673bfb8fcf)
+    words = 'Mr. MILLER. The hearing will come to order. Thank you all for being here this morning. ' * 40
+    cover = ("VA FEE BASIS CARE: EXAMINING SOLUTIONS TO A FLAWED SYSTEM\n\nHEARING\n\nBEFORE THE\n\nSUBCOMMITTEE ON HEALTH\n\n"
+             "OF THE\n\nCOMMITTEE ON VETERANS' AFFAIRS\nU.S. HOUSE OF REPRESENTATIVES\n\nONE HUNDRED TWELFTH CONGRESS\n"
+             "SECOND SESSION\n\nSEPTEMBER 14, 2012\n\nSERIAL No. 112-75\n\nPrinted for the use of the Committee on Veterans' Affairs\n\n"
+             "U.S. GOVERNMENT PRINTING OFFICE\nWASHINGTON, DC: 2012\n\n")
+    printed = f'<html><head><title>VA FEE BASIS CARE</title></head><body><pre>{cover}{words}</pre></body></html>'.encode()
+    reporter = (f'<html><head><title>Fee basis care</title></head><body><pre>STENOGRAPHIC TRANSCRIPT OF PROCEEDINGS\n\n'
+                f'HEARING BEFORE THE SUBCOMMITTEE ON HEALTH\n\nALDERSON COURT REPORTING\n\n{words}</pre></body></html>').encode()
+    staged = _stage_raw_fixture(tmp_path, engine, [dict(url=f'{site}/final-transcript-hearing-va-fee-basis-care', data=printed, format='html'),
+                                                   dict(url=f'{site}/final-transcript-hearing-va-fee-basis-care-day-two', data=reporter, format='html')])
+    build_release(captures=staged['captures'], readings=staged['readings'], filename_readings=staged['filename_readings'],
+        parser_versions={p: staged['parser_versions'][p] for p in ['sniff', 'html', 'xml', 'json']},
+        catalog_version=staged['catalog_version'], engine=engine, output=tmp_path / 'release', scratch=tmp_path / 'model')
+    rows = {r['filename']: (r['document_kind'], r['document_family']) for r in pq.read_table(tmp_path / 'release/list.parquet').to_pylist()}
+    assert rows == {'final-transcript-hearing-va-fee-basis-care': (['published-hearing'], ['published-hearing']),
+                    'final-transcript-hearing-va-fee-basis-care-day-two': (['transcript'], ['transcript'])}
+
+
 def test_a_newer_identical_copy_never_renames_or_redates_the_document(tmp_path):
     """ct-vq2a, ct-kwse (nightly ef4c1632): the saved copy is the newest fetch, but package, filename date
     and Congress come from every copy of the bytes, and only a GovInfo-form filename names a package;
-    an act's title year dates nothing."""
+    an act's title year dates nothing. The document shows its official name where a copy has one
+    (ct-h8dr): the House names of Batcheller and Bus and the GovInfo bill name, not the newer committee
+    copies' names; a committee site's sha256-prefixed copy of a House name is not an official name."""
     from viewer_publication.archive_model import build_release
     engine = NativeDatasets.from_config(os.environ['DOCSPEC_JOB_CONFIG'])
     pdf = lambda text: f'%PDF-1.7\n{text}\n%%EOF\n'.encode()
@@ -2135,12 +2466,108 @@ def test_a_newer_identical_copy_never_renames_or_redates_the_document(tmp_path):
     rows = pq.read_table(tmp_path / 'release/detail.parquet').to_pylist()
     facts = {r['filename']: (r['package_id'], r['document_date'] and str(r['document_date']), r['document_date_source'], r['congress']) for r in rows}
     assert facts == {
-        'AFWA testimony_H.R. 2264_Bear Protection Act of 2019_6-23-20_final.pdf': (None, '2020-06-25', 'filename', 116),
-        'hr1833-text.pdf': ('BILLS-117hr1833ih', None, None, 117),
+        'HHRG-116-II13-Wstate-BatchellerG-20200625.pdf': (None, '2020-06-25', 'filename', 116),
+        'BILLS-117hr1833ih.pdf': ('BILLS-117hr1833ih', None, None, 117),
         'BILLS-117hr1833ih-Katko.pdf': (None, None, None, 117),
         'Wildlife Act of 2019_6-23-20_testimony.pdf': (None, None, None, None),
         '2012 04 23 Webster testimony.pdf': (None, '2012-04-25', 'filename', 112),
-        bus: (None, '2017-09-06', 'filename', 115)}, facts
+        'HHRG-115-SY18-Wstate-BusJ-20170906.pdf': (None, '2017-09-06', 'filename', 115)}, facts
+
+
+def test_a_later_capture_of_held_bytes_never_renames_the_document(tmp_path):
+    """ct-f7hp (candidate 8c3a3cae): the 2026-11-08 run fetched 621 documents' bytes again at a mirror
+    address, and each took the mirror's name, kind, family and facts. A fetch that found the archive
+    already holding its bytes (receipt outcome 'unchanged') no longer leads a copy that stored them.
+    The only named copy still names its document, a recovery-only document captured live at its
+    original address still becomes an original, and every document keeps a saved address."""
+    from viewer_publication.archive_model import build_release
+    engine = NativeDatasets.from_config(os.environ['DOCSPEC_JOB_CONFIG'])
+    raw = tmp_path / 'raw'
+    mirror = 'https://democrats-edworkforce.house.gov/'
+    official = 'https://docs.house.gov/meetings/ED/ED10/20250520/118261/HHRG-119-ED10-Wstate-PalagashviliL-20250520.pdf'
+    generic = mirror + 'imo/media/doc/testimony7.pdf'
+    unnamed = 'https://edworkforce.house.gov/download/?id=B6029D49-F86F-497E-B2E7-94CB6D9D0E6C'
+    named_later = mirror + 'imo/media/doc/akers_written_testimony.pdf'
+    dead, dead_copy = mirror + 'hearings/opening-statement-10', 'https://web.archive.org/web/2020/' + mirror + 'hearings/opening-statement-10'
+    live = mirror + 'imo/media/doc/opening_statement11.pdf'
+    lost, lost_copy = mirror + 'hearings/witness-testimony', 'https://web.archive.org/web/2020/' + mirror + 'hearings/witness-testimony'
+    pdf = {name: f'%PDF-1.7\n{name} body\n%%EOF\n'.encode() for name in ('kept', 'named', 'live', 'lost')}
+
+    def entry(content):
+        digest = hashlib.sha256(content).hexdigest()
+        path = raw / f'bodies/sha256/{digest[:2]}/{digest}'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+        return dict(sha256=digest, bytes=len(content), media_type='application/pdf', fidelity='exact-bytes', sniffed_format='pdf',
+            sniff_version=readings.current_version('sniff'), intact=True, stored_suffix='', stored_bytes=len(content),
+            stored_md5=hashlib.md5(content).hexdigest())
+
+    def fetch(url, content, at, outcome='stored', requested=None, status=200):
+        return dict(writer=dict(job='fixture', commit='a' * 40), run_id='fixture', mode='fetch', family='documents', outcome=outcome,
+            requested_url=requested or url, url=url, response_headers={}, http_status=status, complete=True, retrieved_at=at,
+            captures=[entry(content)] if content else [])
+
+    def recovered(original, content, copy_url):
+        return dict(writer=dict(job='fixture', commit='a' * 40), run_id='fixture', mode='retained_import', family='documents',
+            outcome='saved', requested_url=copy_url, url=copy_url, response_headers={}, http_status=200, complete=True,
+            retrieved_at='2026-10-15T13:43:02Z', source_associations=[dict(original_url=original, basis='user_accepted_url_variant')],
+            recovery_evidence=dict(original_url=original, imported_at='2026-10-15T14:00:50Z', match_basis='user_accepted_url_variant',
+                acquisition=dict(prior_access_category='recovered_document', recovered_url=copy_url, source='user_accepted_recovery')),
+            captures=[entry(content)])
+
+    early, late = '2026-10-01T12:00:00Z', '2026-11-08T18:00:00Z'
+    lines = [fetch(official, pdf['kept'], early), fetch(generic, pdf['kept'], late, outcome='unchanged'),
+        fetch(unnamed, pdf['named'], early), fetch(named_later, pdf['named'], late, outcome='unchanged'),
+        fetch(dead, None, early, outcome='failed', status=410), recovered(dead, pdf['live'], dead_copy),
+        fetch(live, pdf['live'], late, outcome='unchanged', requested=dead),
+        fetch(lost, None, early, outcome='failed', status=410), recovered(lost, pdf['lost'], lost_copy)]
+    receipt = raw / 'receipts/documents/2026-11-08/slice.jsonl.gz'
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    encoded = gzip.compress(''.join(json.dumps(r) + '\n' for r in lines).encode(), mtime=0)
+    receipt.write_bytes(encoded)
+    pin = tmp_path / 'pin.json'
+    pin.write_text(json.dumps(dict(path=str(receipt), size=len(encoded), sha256=hashlib.sha256(encoded).hexdigest(), producer='fixture creation')))
+    decisions = tmp_path / 'recoveries.jsonl'
+    decisions.write_text(''.join(json.dumps(dict(id=name, body_sha256=hashlib.sha256(pdf[name]).hexdigest(), original_url=original,
+        recovered_filename=None, recovered_url=copy_url, kind='recovered_document', identity_note=None, decided_at='2026-10-27T15:46:39Z',
+        supersedes=None, recovery_record_version=2)) + '\n' for name, original, copy_url in (('live', dead, dead_copy), ('lost', lost, lost_copy))))
+    recovery_files = [dict(key='provenance/recoveries/fixture.jsonl', path=str(decisions))]
+    captures = stage_captures([dict(key=receipt.relative_to(raw).as_posix(), path=str(receipt), qualification=str(pin))],
+        engine=engine, work=tmp_path / 'stage') / 'captures.parquet'
+    assert sorted(r['outcome'] for r in pq.read_table(captures, columns=['outcome', 'mode']).to_pylist() if r['mode'] == 'fetch') == [
+        'failed', 'failed', 'stored', 'stored', 'unchanged', 'unchanged', 'unchanged']
+    inventory = tmp_path / 'inventory'
+    inventory.mkdir()
+    run_job(inventory, engine, inputs=[dict(name='captures', kind='parquet', path=str(captures))], steps=[], outputs=[parquet_output(inventory, 'bodies',
+        """SELECT DISTINCT sha256 AS body_sha,'bodies/sha256/'||substr(encode(sha256,'hex'),1,2)||'/'||encode(sha256,'hex') AS physical_key,
+        'bodies/sha256/'||substr(encode(sha256,'hex'),1,2)||'/'||encode(sha256,'hex') AS relative_path,stored_bytes FROM captures WHERE sha256 IS NOT NULL""", ['body_sha'])])
+    pages = readings.stage(captures=captures, body_inventory=inventory / 'bodies.parquet', local_root=raw, engine=engine, work=tmp_path / 'read',
+        decided_at='2026-10-27T12:00:00Z', parser='html')
+    names = filenames.stage(captures=captures, recovery_files=recovery_files, engine=engine, work=tmp_path / 'names', decided_at='2026-10-27T12:00:00Z')
+    build_release(captures=captures, readings=pages['readings'], filename_readings=names['readings'], recovery_files=recovery_files,
+        parser_versions={p: readings.current_version(p) for p in ['sniff', 'html', 'xml', 'json']}, catalog_version=names['catalog_version'],
+        engine=engine, output=tmp_path / 'release', scratch=tmp_path / 'model')
+    release = tmp_path / 'release'
+    details = pq.read_table(release / 'detail.parquet').to_pylist()
+    sources = pq.read_table(release / 'sources.parquet').to_pylist()
+    row = {name: next(i for i, d in enumerate(details) if d['saved_body'] == hashlib.sha256(body).digest()) for name, body in pdf.items() if name != 'lost'}
+    saved = lambda name: {s['url'] for s in sources if s['list_row'] == row[name] and s['is_saved']}
+    shown = lambda name: {s['url'] for s in sources if s['list_row'] == row[name]}
+
+    kept = details[row['kept']]
+    assert (kept['filename'], kept['document_kind'], kept['document_family']) == (
+        'HHRG-119-ED10-Wstate-PalagashviliL-20250520.pdf', ['witness-statement'], ['statement'])
+    # What the official name says, none of which 'testimony7.pdf' can.
+    assert {f['field']: f['value'] for f in kept['facts']} == dict(committee_code='ED10', congress='119',
+        date_token_candidates='2025-05-20', document_family='statement', document_kind='witness-statement')
+    assert saved('kept') == {official} and shown('kept') == {official, generic}
+    assert details[row['named']]['filename'] == 'akers_written_testimony.pdf' and saved('named') == {named_later}
+    live_row = details[row['live']]
+    assert (live_row['saved_kind'], live_row['filename']) == ('original', 'opening_statement11.pdf') and saved('live') == {live}
+    assert live_row['link_key'] == hashlib.sha256(pdf['live']).digest()[:8]
+    lost_row = next(d for d in details if d['saved_kind'] == 'recovery')
+    assert lost_row['saved_body'] == hashlib.sha256(pdf['lost']).digest()
+    assert all(s['url'] for s in sources) and all(saved(name) for name in row)
 
 
 def test_printed_hearing_date_and_conflicting_bill_packages_reach_the_export(tmp_path):
@@ -2195,19 +2622,22 @@ def test_printed_hearing_date_and_conflicting_bill_packages_reach_the_export(tmp
 
 
 def test_a_listing_label_outranks_another_formats_page_title(tmp_path):
-    """red-g F1: a rendition's <title> fills a title only when no listing label names the document."""
+    """red-g F1: a rendition's <title> fills a title only when no listing label names the document.
+    The HTML shares the PDF's name: a page merely listed beside a PDF is not its rendition (ct-h3jb).
+    It sits outside /files/, where an HTML body is a failed download, never a real file."""
     from viewer_publication.archive_model import build_release
     engine = NativeDatasets.from_config(os.environ['DOCSPEC_JOB_CONFIG'])
     base = 'https://appropriations.house.gov/files'
+    html_url = 'https://appropriations.house.gov/hearings/text/appendix-d.html'
     words = 'The subcommittee received the appendix tables for fiscal year spending. ' * 30
     listing = (f'<html><head><title>Hearing documents</title></head><body><p>{words}</p><ul>'
-               f'<li><a href="{base}/appendix-d.pdf">Appendix D</a> <a href="https://appropriations.house.gov/news/appendix-d-text">HTML</a></li>'
+               f'<li><a href="{base}/appendix-d.pdf">Appendix D</a> <a href="{html_url}">HTML</a></li>'
                f'</ul></body></html>').encode()
     html = ('<html><head><title>Press release headline</title></head><body><main><article><h1>Appendix D</h1><p>'
             + 'Table D-1 lists obligations by account and fiscal year for the subcommittee. ' * 40 + '</p></article></main></body></html>').encode()
     pdf = b'%PDF-1.7\nAppendix D tables\n%%EOF\n'
     staged = _stage_raw_fixture(tmp_path, engine, [dict(url='https://appropriations.house.gov/hearing', data=listing, format='html'),
-        dict(url=f'https://appropriations.house.gov/news/appendix-d-text', data=html, format='html'), dict(url=f'{base}/appendix-d.pdf', data=pdf, format='pdf', compress=False)])
+        dict(url=html_url, data=html, format='html'), dict(url=f'{base}/appendix-d.pdf', data=pdf, format='pdf', compress=False)])
     build_release(captures=staged['captures'], readings=staged['readings'], filename_readings=staged['filename_readings'],
         parser_versions={p: staged['parser_versions'][p] for p in ['sniff', 'html', 'xml', 'json']},
         catalog_version=staged['catalog_version'], engine=engine, output=tmp_path / 'release', scratch=tmp_path / 'model')
@@ -2219,7 +2649,7 @@ def test_a_listing_label_outranks_another_formats_page_title(tmp_path):
 def test_hhrg_slug_witness_matching_precedence_title_enrichment_and_meeting_propagation(tmp_path):
     """ct-2o4d, ct-o7t4 item 2d, ct-j2yo F1/F2/F6:
     - House witness docs (HHRG-*-{Wstate,TTF,Bio}-*) without URL match resolve to canonical meeting witness via HHRG slug.
-    - URL-matched witnesses superseded by a higher-priority source propagate both witness_key and superseded_by.
+    - URL-matched witnesses superseded by a higher-priority source propagate only canonical superseded_by onto document witness_keys (cat2-8ai9).
     - Generic witness titles ('Witness Statement', 'Witness Biography', 'Truth in Testimony Form') are enriched with witness_name.
     - Witness-linked documents inherit meeting_keys, committee_keys, chambers, and congress from their linked meeting.
     """
@@ -2366,11 +2796,59 @@ def test_hhrg_slug_witness_matching_precedence_title_enrichment_and_meeting_prop
     assert brown_row['title'] == 'Witness Biography - Hon. Robert Brown'
 
     jones_row = list_rows['jones_testimony.pdf']
-    assert len(jones_row['witness_keys']) == 2
+    assert len(jones_row['witness_keys']) == 1
     assert jones_row['meeting_keys'] == ['335902']
     assert jones_row['committee_keys'] == ['ssbk00']
     assert jones_row['chambers'] == ['senate']
     assert jones_row['congress'] == 118
+
+
+def test_a_number_or_a_label_alone_is_not_a_title(tmp_path):
+    """ct-ccsi (release 619db5f9e08e): 268 newly captured event pages titled documents with their link
+    text: 111 bare numbers ("3", "no. 3"), 163 "Biography" and one ".". A text with no letter, or a
+    numbering word and a number, is a link word. A label alone takes the witness's name when the
+    document is one witness's; otherwise the filename shows. A named link text is still the title,
+    whichever page gives it."""
+    from viewer_publication.archive_model import build_release
+    engine = NativeDatasets.from_config(os.environ['DOCSPEC_JOB_CONFIG'])
+    folder = 'https://docs.house.gov/meetings/AG/AG00/20230510/115901'
+    files = {name: (f'{folder}/{name}', f'%PDF-1.7\n{name}\n%%EOF\n'.encode()) for name in [
+        'HHRG-118-AG00-Bio-BrownR-20230510.pdf', 'Parker_Bio_05_10_23.pdf', 'garcia_testimony.pdf',
+        'BILLS-118-HR1-S000001-Amdt-3.pdf', 'BILLS-118-HR1-T000002-Amdt-4.pdf', 'figure-10.pdf', 'votes.pdf', 'rural-credit-report.pdf']}
+    # A file whose address names nothing: with no filename to show, its label is all there is.
+    files[''] = ('https://agriculture.house.gov/?p=55', b'%PDF-1.7\nA statement served from a query address\n%%EOF\n')
+    link = lambda name, text: f'<li><a href="{files[name][0]}">{text}</a></li>'
+    words = 'Committee hearing witness documents and statements for rural credit. ' * 25
+    event = (f'<html><head><title>Committee Hearing</title></head><body><p>{words}</p><ul>'
+             + link('HHRG-118-AG00-Bio-BrownR-20230510.pdf', 'Biography') + link('Parker_Bio_05_10_23.pdf', 'Biography')
+             + link('garcia_testimony.pdf', 'Testimony') + link('BILLS-118-HR1-S000001-Amdt-3.pdf', 'no. 3')
+             + link('BILLS-118-HR1-T000002-Amdt-4.pdf', '4') + link('figure-10.pdf', '.') + link('votes.pdf', '16-4')
+             + link('rural-credit-report.pdf', 'Rural Credit Report No. 3') + link('', 'Testimony') + '</ul></body></html>').encode()
+    # A later page names the fourth amendment; the first page's "4" must not outrank it.
+    markup = (f'<html><head><title>Markup Results</title></head><body><p>{"The committee considered amendments to the bill. " * 30}</p><ul>'
+              + link('BILLS-118-HR1-T000002-Amdt-4.pdf', 'Thompson Amendment on Loan Limits') + '</ul></body></html>').encode()
+    staged = _stage_raw_fixture(tmp_path, engine, [
+        dict(url='https://agriculture.house.gov/calendar/eventsingle.aspx?EventID=7001', data=event, format='html', retrieved_at='2026-10-27T12:00:00Z'),
+        dict(url='https://agriculture.house.gov/news/markup-results', data=markup, format='html', retrieved_at='2026-10-28T12:00:00Z'),
+        *[dict(url=url, data=data, format='pdf', compress=False) for url, data in files.values()]])
+    meetings = [dict(record_sha='55' * 32, source='congress_gov', meetings=[dict(
+        event_id='115901', chamber='house', congress=118, session=1, updated='2023-05-10T14:00:00Z', title='House Farm Credit Hearing',
+        meeting_date='2023-05-10', meeting_type='Hearing', status='Scheduled', sittings=[],
+        committees=[dict(system_code='hsag00', name='House Agriculture')], subject_keys=[], transcript_jackets=[], videos=[])])]
+    appearances = [dict(record_sha='66' * 32, source='congress_gov', appearances=[dict(
+        event_id='115901', name_key='robert brown', name='Hon. Robert Brown', given_name='Robert', family_name='Brown',
+        honorific_prefix='Hon.', panel_order=1, display_order=1, document_urls=[])])]
+    build_release(**staged, meeting_records=meetings, appearance_records=appearances,
+        spicy_regs=spicy_input(spicy_committees=[dict(system_code='HSAG00', name='House Agriculture', chamber='House')]),
+        engine=engine, output=tmp_path / 'release', scratch=tmp_path / 'model')
+    titles = {row['filename']: row['title'] for row in pq.read_table(tmp_path / 'release/list.parquet').to_pylist() if row['format'] == 'pdf'}
+    assert titles == {
+        'HHRG-118-AG00-Bio-BrownR-20230510.pdf': 'Biography - Hon. Robert Brown',   # one witness's document: the label takes the name
+        'Parker_Bio_05_10_23.pdf': None, 'garcia_testimony.pdf': None,              # a label alone: the filename shows
+        'BILLS-118-HR1-S000001-Amdt-3.pdf': None, 'figure-10.pdf': None, 'votes.pdf': None,
+        'BILLS-118-HR1-T000002-Amdt-4.pdf': 'Thompson Amendment on Loan Limits',    # another page gives a name
+        'rural-credit-report.pdf': 'Rural Credit Report No. 3',                     # a number inside a name is part of it
+        '': 'Testimony'}                                                            # no filename to show: the label stays
 
 
 def test_subject_key_reconciliation_and_historical_rosters(tmp_path):
@@ -2910,7 +3388,7 @@ def test_subject_key_reconciliation_and_historical_rosters(tmp_path):
         dict(congress=113, system_code='hlig01', bioguide_id='A000001', title='Member', rank=1, party='Democrat'),
         dict(congress=115, system_code='ssbk00', bioguide_id='C000003', title='Member', rank=1, party=None),
         dict(congress=117, system_code='hsvr09', bioguide_id='C000003', title='Chair', rank=1, party='Republican'),
-        dict(congress=117, system_code='hsvr09', bioguide_id='B000002', title='Ranking Member', rank=2, party='Republican'),
+        dict(congress=117, system_code='hsvr09', bioguide_id='B000002', title='Ranking Member', rank=None, party='Republican'),
         dict(congress=119, system_code='ssbk00', bioguide_id='A000001', title='Member', rank=1, party='Democrat'),
     )]
     files_by_name = {f['name']: f for f in manifest['files']}

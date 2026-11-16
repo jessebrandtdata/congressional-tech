@@ -11,7 +11,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-from congress_api.lake import appearance_records,capture_staging,captures,committee_records,filenames,meeting_records,playlist_records,readings,tables,video_records
+from congress_api.lake import appearance_records,capture_staging,captures,committee_records,filenames,meeting_records,playlist_records,readings,tables,transcript_headings,video_records
 from congress_api.lake.producer_records import DAILY_JOB,appended_from,owed_key,pin_of
 from congress_api.lake.receipt_inventory import (LocalReceiptStore,R2ReceiptStore,copy_receipts,
     discover_receipts,select_receipts)
@@ -27,7 +27,8 @@ ROOT=Path(__file__).resolve().parents[5]
 TABLE_NAMES=('captures','readings','filename_readings')
 OPTIONAL_TABLE_NAMES=('meeting_records','appearance_records')
 ALL_TABLE_NAMES=TABLE_NAMES+OPTIONAL_TABLE_NAMES
-DAILY_CAPTURE_RECORDS={'committee_records':committee_records,'playlist_records':playlist_records,'video_records':video_records}
+DAILY_CAPTURE_RECORDS={'committee_records':committee_records,'playlist_records':playlist_records,'video_records':video_records,
+                       'transcript_headings':transcript_headings}
 PROVENANCE_KINDS=('recoveries','reviews','unreadable')
 QUALIFIED_FIELDS={'key','etag','path','sha256','size'}
 LISTING_SCHEMA=pa.schema([('key',pa.string()),('size',pa.int64()),('etag',pa.string())])
@@ -213,9 +214,12 @@ def _final_provenance(initial,raw_store,imported,identities,*,acknowledgements=N
 def derived_parsers(spec):
     """Derived readings passes a run asks for; default none, so a first run never demands a backfill."""
     value=spec.get('derived_parsers',[])
-    if (not isinstance(value,list) or any(not isinstance(p,str) or p not in readings.READ_AS for p in value)
+    # The scoped daily path below currently implements HTML metadata admission.
+    # Other derived readers run explicitly until their daily baseline is qualified.
+    supported=('html_metadata',)
+    if (not isinstance(value,list) or any(not isinstance(p,str) or p not in supported for p in value)
             or len(set(value))!=len(value)):
-        raise ValueError('derived_parsers must list distinct derived readings parsers: '+', '.join(readings.READ_AS))
+        raise ValueError('derived_parsers must list distinct supported daily parsers: '+', '.join(supported))
     return value
 
 
@@ -227,7 +231,7 @@ def derived_scopes(spec):
     retain unfinished pairs admitted after it. A version move needs a newly qualified
     baseline; it must not silently turn a daily pass into a historical replay.
     """
-    from congress_api.lake.compatible_versions import current_pins
+    from congress_api.lake.compatible_versions import LEAF_PARSERS,current_pins
     requested=derived_parsers(spec)
     scopes=spec.get('derived_scopes',{})
     if not isinstance(scopes,dict) or set(scopes)!=set(requested):
@@ -237,7 +241,13 @@ def derived_scopes(spec):
                 or not isinstance(scope['captures'],dict)):
             raise ValueError('Derived scopes require a qualified captures baseline, versions and budgets')
         tables.table_input('derived_baseline',scope['captures'])
-        if scope['versions']!=current_pins():
+        # A newly available optional reader does not invalidate an existing
+        # baseline. Require the active reader and all of its classification pins;
+        # every additional declared pin must still name a known current version.
+        pins=current_pins();versions=scope['versions']
+        required={*LEAF_PARSERS,name,'readings'}
+        if (not isinstance(versions,dict) or not required<=versions.keys()
+                or not versions.keys()<=pins.keys() or any(pins[k]!=v for k,v in versions.items())):
             raise ValueError('Derived scope reading versions changed; qualify a new baseline')
         readings._positive(scope['max_stored_bytes'],'max_stored_bytes')
     return scopes
@@ -264,9 +274,10 @@ def _stale_mapping_receipts(captures_pin,current,*,engine,work):
 def _discovered_receipts(families,raw_store,captures_head,*,engine,work):
     """Receipts in the raw store that captures lacks, copied and qualified under work.
 
-    Lists each family's dated prefixes from its newest captured date on (inclusive), so a
-    run costs one listing per new day, not the whole history; the native anti-join drops
-    keys already in captures.
+    Lists each family's dated prefixes within INCREMENTAL_LOOKBACK_DAYS of its newest
+    captured date and onward (inclusive), so late receipts in recent prior day prefixes
+    are picked up without listing full history; the native anti-join drops keys already
+    in captures.
     """
     adapter=raw_store.adapter
     store=(R2ReceiptStore(adapter.client,adapter.bucket) if isinstance(adapter,R2Adapter)
@@ -347,6 +358,48 @@ def _head(client,bucket,key):
         time.sleep(delay)
 
 
+def _scope_daily_inputs(heads,backlog,stage,*,engine,output_dir,job_dir,need_keys=False):
+    """Materialize the local captures and readings subsets for (backlog + staged) bodies once."""
+    from congress_api.retention.provenance import parquet_output,run_job
+    output_dir=Path(output_dir);output_dir.mkdir(parents=True,exist_ok=True)
+    if not backlog['work_items'] and stage is None:
+        run_job(Path(job_dir),engine,inputs=[tables.table_input('captures',heads['captures']),
+            tables.table_input('readings',heads['readings'])],steps=[],
+            outputs=[parquet_output(output_dir,'scoped-captures','SELECT * FROM captures WHERE false',
+                    ['receipt_key','receipt_line','capture_index']),
+                parquet_output(output_dir,'scoped-readings','SELECT * FROM readings WHERE false',readings.PK)])
+        return dict(captures=output_dir/'scoped-captures.parquet',readings=output_dir/'scoped-readings.parquet',keys=[])
+    inputs=[tables.table_input('captures',heads['captures']),tables.table_input('readings',heads['readings']),
+            tables.table_input('backlog',backlog['work_list'])]
+    scoped='SELECT DISTINCT body_sha AS sha256 FROM backlog'
+    listed='SELECT sha256 FROM scoped_shas'
+    rows='SELECT * FROM prior_captures'
+    if stage is not None:
+        inputs.append(tables.table_input('staged',stage))
+        names=pq.read_schema(stage).names
+        scoped+=' UNION SELECT sha256 FROM staged WHERE sha256 IS NOT NULL'
+        listed=('SELECT DISTINCT body_sha AS sha256 FROM backlog'
+                ' UNION SELECT s.sha256 FROM staged s WHERE s.sha256 IS NOT NULL'
+                ' AND NOT EXISTS(SELECT 1 FROM prior_captures c WHERE c.sha256=s.sha256)')
+        rows=('SELECT '+','.join('c."'+n+'"' for n in names)+' FROM prior_captures c'
+              ' UNION ALL SELECT '+','.join('"'+n+'"' for n in names)+' FROM staged')
+    steps=[dict(name='scoped_shas',sql=scoped,materialize=True),
+           dict(name='prior_captures',sql='SELECT c.* FROM scoped_shas k JOIN captures c ON c.sha256=k.sha256',materialize=True)]
+    if need_keys:steps.append(dict(name='listed_shas',sql=listed,materialize=True))
+    steps.append(dict(name='scoped_captures',sql=rows,materialize=True))
+    queries=([dict(name='keys',sql="""SELECT DISTINCT concat('bodies/sha256/',substr(encode(c.sha256,'hex'),1,2),'/',
+        encode(c.sha256,'hex'),coalesce(c.stored_suffix,'.gz')) AS key FROM scoped_captures c
+        JOIN listed_shas k ON c.sha256=k.sha256 ORDER BY key""")] if need_keys else [])
+    result=run_job(Path(job_dir),engine,inputs=inputs,steps=steps,
+        outputs=[parquet_output(output_dir,'scoped-captures','SELECT * FROM scoped_captures',
+                ['receipt_key','receipt_line','capture_index']),
+            parquet_output(output_dir,'scoped-readings','SELECT r.* FROM scoped_shas k JOIN readings r ON k.sha256=r.body_sha',
+                readings.PK)],
+        queries=queries)
+    return dict(captures=output_dir/'scoped-captures.parquet',readings=output_dir/'scoped-readings.parquet',
+        keys=[row['key'] for row in result.get('keys',[])])
+
+
 def _listed_custody(spec,engine,raw_store,heads,backlog,stage,unreadable_snapshot,work,*,parser=None):
     """Raw custody, before captures move, for every body the readings run after the append reads.
 
@@ -358,26 +411,8 @@ def _listed_custody(spec,engine,raw_store,heads,backlog,stage,unreadable_snapsho
     one HEAD per recorded candidate copy, not a bucket LIST.
     """
     work=Path(work);work.mkdir(parents=True)
-    inputs=[tables.table_input('captures',heads['captures']),tables.table_input('backlog',backlog['work_list'])]
-    listed='SELECT body_sha AS sha256 FROM backlog'
-    scoped='SELECT sha256 FROM listed_shas'
-    rows='SELECT c.* FROM captures c JOIN scoped_shas k ON c.sha256=k.sha256'
-    if stage is not None:
-        inputs.append(tables.table_input('staged',stage))
-        names=pq.read_schema(stage).names
-        listed+=(' UNION SELECT s.sha256 FROM staged s WHERE s.sha256 IS NOT NULL'
-                 ' AND NOT EXISTS(SELECT 1 FROM captures c WHERE c.sha256=s.sha256)')
-        scoped+=' UNION SELECT sha256 FROM staged WHERE sha256 IS NOT NULL'
-        rows=('SELECT '+','.join('c."'+n+'"' for n in names)+' FROM captures c JOIN scoped_shas k ON c.sha256=k.sha256'
-              ' UNION ALL SELECT '+','.join('"'+n+'"' for n in names)+' FROM staged')
-    from congress_api.retention.provenance import parquet_output,run_job
-    keys=[row['key'] for row in run_job(work/'scope',engine,inputs=inputs,steps=[
-        dict(name='listed_shas',sql=listed,materialize=True),dict(name='scoped_shas',sql=scoped,materialize=True),
-        dict(name='scoped_captures',sql=rows,materialize=True)],
-        outputs=[parquet_output(work,'scoped-captures','SELECT * FROM scoped_captures',['receipt_key','receipt_line','capture_index'])],
-        queries=[dict(name='keys',sql="""SELECT DISTINCT concat('bodies/sha256/',substr(encode(c.sha256,'hex'),1,2),'/',
-            encode(c.sha256,'hex'),coalesce(c.stored_suffix,'.gz')) AS key FROM scoped_captures c
-            JOIN listed_shas k ON c.sha256=k.sha256 ORDER BY key""")])['keys']]
+    scoped=_scope_daily_inputs(heads,backlog,stage,engine=engine,output_dir=work,job_dir=work/'scope',need_keys=True)
+    keys=scoped['keys']
     for key in keys:validate_key(key)
     client,bucket=raw_store.adapter.client,raw_store.adapter.bucket
     with ThreadPoolExecutor(max_workers=max(1,min(HEAD_WORKERS,len(keys)))) as pool:
@@ -385,11 +420,12 @@ def _listed_custody(spec,engine,raw_store,heads,backlog,stage,unreadable_snapsho
     listing=work/'body-listing.parquet'
     pq.write_table(pa.Table.from_pylist([row for row in found if row is not None],schema=LISTING_SCHEMA),listing)
     planned=readings.run(engine=engine,work=work/'readings',mode='daily',execute=False,
-        max_work_items=spec['max_work_items'],existing=heads['readings'],captures=work/'scoped-captures.parquet',
+        max_work_items=spec['max_work_items'],existing=scoped['readings'],captures=scoped['captures'],
         unreadable_files=unreadable_snapshot.files(),body_inventory=None,body_listing=listing,raw_ranges=True,
         local_root=work/'unopened',decided_at=spec['decided_at'],parser=parser)
     return dict(listing=listing,planned=planned,heads=len(keys),
-                absent=[key for key,row in zip(keys,found) if row is None])
+                absent=[key for key,row in zip(keys,found) if row is None],
+                scoped_captures=scoped['captures'],scoped_readings=scoped['readings'])
 
 
 def _body_source(spec,raw_store,work,listing=None):
@@ -677,6 +713,46 @@ def _scope_html_inputs(scope, heads, *, engine, work, allow_empty=False):
     return len(keys)
 
 
+def _stored_bytes(work_list):
+    """(known stored bytes, bodies with no stored size) over one work list."""
+    sizes=pq.read_table(work_list,columns=['stored_bytes']).column('stored_bytes')
+    return pc.sum(sizes).as_py() or 0,sizes.null_count
+
+
+def _carry_html_metadata(work_list,scoped,max_items,max_bytes,*,engine,work):
+    """Narrow the scoped captures and readings to the oldest budget's worth of the work list.
+
+    Bodies are ordered by their oldest receipt in (day, key) order, as _within_budget orders
+    receipts (RECEIPT_DAY), then by hash, so nothing starves and every night picks the same
+    prefix. The prefix stops at `max_items` bodies or before its stored bytes pass `max_bytes`,
+    but always holds one body. An unknown stored size (an R2 capture that pinned none; custody
+    learns it later) counts as more than the whole byte budget, so such a body is only ever
+    admitted alone, first. The rest stays unread in the current heads, which the next night's
+    anti-join selects again; nothing records it here. One native job: O(W log W) for W pending
+    bodies plus joins from them into the scoped captures and readings, never a rescan per body.
+    """
+    receipt=f"concat(coalesce((regexp_match(c.receipt_key,'{RECEIPT_DAY.pattern}'))[1],''),' ',c.receipt_key)"
+    order='ORDER BY f.oldest,w.body_sha'
+    carried=run_job(work,engine,inputs=[tables.table_input('work_list',work_list),
+        tables.table_input('captures',scoped/'captures.parquet'),tables.table_input('readings',scoped/'readings.parquet')],
+        steps=[dict(name='oldest',materialize=True,sql=f'''SELECT w.body_sha,min({receipt}) AS oldest
+            FROM work_list w JOIN captures c ON c.sha256=w.body_sha GROUP BY w.body_sha'''),
+        dict(name='ordered',materialize=True,sql=f'''SELECT w.body_sha,w.stored_bytes,f.oldest,
+            row_number() OVER ({order}) AS position,
+            sum(coalesce(w.stored_bytes,{int(max_bytes)+1})) OVER ({order} ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS held
+            FROM work_list w JOIN oldest f ON f.body_sha=w.body_sha'''),
+        dict(name='admitted',materialize=True,sql=f'''SELECT body_sha FROM ordered
+            WHERE position<={int(max_items)} AND (held<={int(max_bytes)} OR position=1)''')],
+        outputs=[parquet_output(work,'captures','SELECT c.* FROM admitted a JOIN captures c ON c.sha256=a.body_sha',
+                ['receipt_key','receipt_line','capture_index']),
+            parquet_output(work,'readings','SELECT r.* FROM admitted a JOIN readings r ON r.body_sha=a.body_sha',readings.PK)],
+        # Known sizes only: the stand-in for an unknown size is a rule, not bytes.
+        queries=[dict(name='carried',sql='''SELECT count(*) AS bodies,coalesce(sum(stored_bytes),0) AS stored_bytes,
+            count(*)-count(stored_bytes) AS unknown_sizes,nullif(split_part(min(oldest),' ',1),'') AS oldest_day
+            FROM ordered o WHERE NOT EXISTS(SELECT 1 FROM admitted a WHERE a.body_sha=o.body_sha)''')])['carried'][0]
+    return carried
+
+
 def _daily_html_metadata(spec,heads,*,engine,raw_store,unreadable_snapshot,work):
     """Read only missing pairs for bodies admitted after a qualified immutable baseline.
 
@@ -685,6 +761,9 @@ def _daily_html_metadata(spec,heads,*,engine,raw_store,unreadable_snapshot,work)
     older readings and active unreadable decisions before either budget is evaluated.
     Admitted work fits both budgets, so it is read in one batch and appended in one
     catalog commit (ct-z4i9: one commit per body made the step 93% catalog round-trips).
+    Work past a budget is carried, not refused (ct-hiec): the oldest budget's worth is
+    read (_carry_html_metadata) and the report names the rest, which the next night's
+    selection finds still unread. Unknown stored sizes at the read still refuse.
     """
     scope=derived_scopes(spec)['html_metadata']
     baseline=scope['captures']
@@ -694,7 +773,7 @@ def _daily_html_metadata(spec,heads,*,engine,raw_store,unreadable_snapshot,work)
     scope_work=work/'delta'
     scope_work.mkdir(parents=True,exist_ok=False)
     inputs=[tables.table_input('captures',heads['captures']),tables.table_input('baseline',baseline)]
-    schema=dict(id='Utf8',body_sha256='Utf8',parser='Utf8',supersedes='Utf8')
+    schema=dict(id='Utf8',body_sha256='Utf8',parser='Utf8',reason='Utf8',supersedes='Utf8')
     files=unreadable_snapshot.files()
     inputs.append(dict(name='unreadable',kind='json_lines',files=files,
         schema=dict(fields=[field(k,v) for k,v in schema.items()],metadata={})) if files
@@ -703,6 +782,7 @@ def _daily_html_metadata(spec,heads,*,engine,raw_store,unreadable_snapshot,work)
         dict(name='reconsidered_shas',materialize=True,sql='''
             SELECT decode(u.body_sha256,'hex') AS body_sha FROM unreadable u
             WHERE u.parser='html_metadata' AND u.body_sha256 IS NOT NULL
+                AND coalesce(u.reason,'')<>'withdrawn'
                 AND EXISTS (SELECT 1 FROM unreadable newer WHERE newer.supersedes=u.id)'''),
         # Baseline captures repeat a body for each capture occurrence. Membership
         # needs one key, otherwise anti/semi joins repeat duplicate match work.
@@ -726,13 +806,24 @@ def _daily_html_metadata(spec,heads,*,engine,raw_store,unreadable_snapshot,work)
     reconsidered=observed['reconsidered_baseline'][0]['n']
     details=dict(scope=dict(baseline=baseline,versions=scope['versions'],
         bodies_since_baseline=count-reconsidered,reconsidered_baseline_bodies=reconsidered))
-    try:
-        planned=readings.run(engine=engine,work=work/'admission',mode='daily',execute=False,
+    def admit(scoped,name):
+        return readings.run(engine=engine,work=work/name,mode='daily',execute=False,
             max_work_items=spec['max_work_items'],existing=scoped/'readings.parquet',
             captures=scoped/'captures.parquet',unreadable_files=unreadable_snapshot.files(),
             decided_at=spec['decided_at'],parser='html_metadata',**source)
+    try:
+        planned=admit(scoped,'admission');pending=planned['work_list']
+        known,unknown=_stored_bytes(pending)
+        # An unknown size may be anything once custody learns it: read it alone (ct-hiec).
+        over=known>scope['max_stored_bytes'] or (unknown and planned['work_items']>1)
     except readings.BackfillRequired as error:
-        return dict(error.as_dict(),status='derived_budget_required',batches=[],**details)
+        pending=error.report['work_list'];over=True
+    if over:
+        details['carried']=_carry_html_metadata(pending,scoped,
+            spec['max_work_items'],scope['max_stored_bytes'],engine=engine,work=work/'carry')
+        scoped=work/'carry'
+        # The narrowed scope holds at most max_work_items bodies, so this plan cannot exceed it.
+        planned=admit(scoped,'admitted')
     listing=None
     if _listed_reads(spec,raw_store):
         custody=_listed_custody(spec,engine,raw_store,
@@ -741,16 +832,13 @@ def _daily_html_metadata(spec,heads,*,engine,raw_store,unreadable_snapshot,work)
         planned=custody['planned'];listing=custody['listing']
         if planned['raw_custody']['missing_pins'] or planned['raw_custody']['conflicts']:
             raise readings.RawCustodyRequired(planned)
-    stored_bytes=0;missing_sizes=0
-    for batch in pq.ParquetFile(planned['work_list']).iter_batches(columns=['stored_bytes']):
-        for size in batch.column('stored_bytes').to_pylist():
-            if size is None:missing_sizes+=1
-            else:stored_bytes+=size
+    stored_bytes,missing_sizes=_stored_bytes(planned['work_list'])
     budget=dict(work_items=planned['work_items'],max_work_items=spec['max_work_items'],
         stored_bytes=stored_bytes,missing_sizes=missing_sizes,max_stored_bytes=scope['max_stored_bytes'])
     details['budget']=budget
-    if missing_sizes or stored_bytes>scope['max_stored_bytes']:
-        # The generic nightly backfill fallback cannot repair this scoped byte budget.
+    if missing_sizes or (stored_bytes>scope['max_stored_bytes'] and planned['work_items']>1):
+        # The generic nightly backfill fallback cannot repair this scoped byte budget. One body
+        # past it is read alone (at most MAX_STORED_BYTES, as _batches allows), so it cannot block.
         return dict(status='derived_budget_required',parser='html_metadata',
             parser_version=readings.current_version('html_metadata'),batches=[],**details)
     current=tables.resolve_tables(engine=engine,catalog_root=spec['catalog_root'],work=work/'admitted-heads',
@@ -849,7 +937,175 @@ def produce_html_metadata(*, engine, raw_store, producer_records, catalog_root, 
     return dict(report, pins=final, unreadable=unreadable_snapshot.rows())
 
 
-def produce_daily(spec,*,engine,raw_store,producer_records=None):
+def _arrow_field_paths(dtype, prefix=''):
+    out = set()
+    if pa.types.is_struct(dtype):
+        for f in dtype:
+            path = f'{prefix}.{f.name}' if prefix else f.name
+            out.add(path)
+            out.update(_arrow_field_paths(f.type, path))
+    elif pa.types.is_list(dtype) or pa.types.is_large_list(dtype):
+        out.update(_arrow_field_paths(dtype.value_type, f'{prefix}[]'))
+    return out
+
+
+def _iceberg_field_paths(schema_obj, prefix=''):
+    out = set()
+    if isinstance(schema_obj, dict) and schema_obj.get('type') == 'struct':
+        for f in schema_obj.get('fields', ()):
+            name = f['name']
+            path = f'{prefix}.{name}' if prefix else name
+            out.add(path)
+            if isinstance(f.get('type'), dict):
+                out.update(_iceberg_field_paths(f['type'], path))
+    elif isinstance(schema_obj, dict) and schema_obj.get('type') == 'list':
+        element = schema_obj.get('element')
+        if isinstance(element, dict):
+            out.update(_iceberg_field_paths(element, f'{prefix}[]'))
+    return out
+
+
+def writer_field_paths(name):
+    paths = _iceberg_field_paths(tables.load_schema(name))
+    arrow_modules = {
+        'filename_readings': (filenames, 'SCHEMA'),
+        'meeting_records': (meeting_records, 'ARROW_SCHEMA'),
+        'appearance_records': (appearance_records, 'ARROW_SCHEMA'),
+        'committee_records': (committee_records, 'ARROW_SCHEMA'),
+        'playlist_records': (playlist_records, 'ARROW_SCHEMA'),
+        'video_records': (video_records, 'ARROW_SCHEMA'),
+    }
+    if name in arrow_modules:
+        mod, attr = arrow_modules[name]
+        paths |= _arrow_field_paths(pa.struct(getattr(mod, attr)))
+    return paths
+
+
+def _sql_lit(value):
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _count_query(name, present_columns):
+    from congress_api.lake import compatible_versions
+
+    registry = compatible_versions.load_registry()
+
+    def allowed_versions(parser_key, current):
+        vals = {current, *(e['version'] for e in registry if e.get('parser') == parser_key and e.get('current') == current)}
+        return ','.join(_sql_lit(v) for v in sorted(vals))
+
+    if name == 'captures':
+        if 'mapping_version' not in present_columns:
+            return 'SELECT count(*) AS total_rows, 0 AS current_rows, count(*) AS stale_records FROM "captures"'
+        allowed = allowed_versions('captures', captures.current_version())
+        return (
+            f'SELECT count(*) AS total_rows, '
+            f'count(*) FILTER (WHERE mapping_version IN ({allowed})) AS current_rows, '
+            f'count(*) FILTER (WHERE mapping_version IS NULL OR mapping_version NOT IN ({allowed})) AS stale_records '
+            f'FROM "captures"'
+        )
+    if name == 'readings':
+        if not {'body_sha', 'parser', 'parser_version'} <= present_columns:
+            return 'SELECT count(*) AS total_rows, 0 AS current_rows, count(*) AS stale_records FROM "readings"'
+        pins = compatible_versions.current_pins()
+        terms = ' OR '.join(
+            f'(parser={_sql_lit(p)} AND parser_version IN ({allowed_versions(p, ver)}))'
+            for p, ver in sorted(pins.items()) if isinstance(ver, str)
+        ) or 'false'
+        return (
+            f'WITH cur AS (SELECT DISTINCT body_sha, parser FROM "readings" WHERE {terms}), '
+            f'all_keys AS (SELECT DISTINCT body_sha, parser FROM "readings") '
+            f'SELECT (SELECT count(*) FROM "readings") AS total_rows, '
+            f'(SELECT count(*) FROM "readings" WHERE {terms}) AS current_rows, '
+            f'(SELECT count(*) FROM all_keys LEFT ANTI JOIN cur '
+            f'ON all_keys.body_sha = cur.body_sha AND all_keys.parser = cur.parser) AS stale_records'
+        )
+    if name == 'filename_readings':
+        if not {'filename', 'source_url', 'catalog_version'} <= present_columns:
+            return 'SELECT count(*) AS total_rows, 0 AS current_rows, count(*) AS stale_records FROM "filename_readings"'
+        allowed = allowed_versions('filename_readings', filenames.current_version())
+        return (
+            f'WITH cur AS (SELECT DISTINCT filename, source_url FROM "filename_readings" WHERE catalog_version IN ({allowed})), '
+            f'all_keys AS (SELECT DISTINCT filename, source_url FROM "filename_readings") '
+            f'SELECT (SELECT count(*) FROM "filename_readings") AS total_rows, '
+            f'(SELECT count(*) FROM "filename_readings" WHERE catalog_version IN ({allowed})) AS current_rows, '
+            f'(SELECT count(*) FROM all_keys LEFT ANTI JOIN cur '
+            f'ON all_keys.filename = cur.filename AND all_keys.source_url = cur.source_url) AS stale_records'
+        )
+    record_modules = {'meeting_records': meeting_records, 'appearance_records': appearance_records, **DAILY_CAPTURE_RECORDS}
+    versions = record_modules[name].current_versions()
+    if not ({'record_sha', 'source', 'parser_version'} <= present_columns and versions):
+        return f'SELECT count(*) AS total_rows, 0 AS current_rows, count(*) AS stale_records FROM "{name}"'
+    pred = ' OR '.join(
+        f'(source={_sql_lit(s)} AND parser_version IN ({allowed_versions(f"{name}.{s}", v)}))'
+        for s, v in sorted(versions.items())
+    )
+    return (
+        f'WITH cur AS (SELECT DISTINCT record_sha, source FROM "{name}" WHERE {pred}), '
+        f'all_keys AS (SELECT DISTINCT record_sha, source FROM "{name}") '
+        f'SELECT (SELECT count(*) FROM "{name}") AS total_rows, '
+        f'(SELECT count(*) FROM "{name}" WHERE {pred}) AS current_rows, '
+        f'(SELECT count(*) FROM all_keys LEFT ANTI JOIN cur '
+        f'ON all_keys.record_sha = cur.record_sha AND all_keys.source = cur.source) AS stale_records'
+    )
+
+
+def inspect_targets(tables_spec, *, engine, catalog_root, work, heads=None, include_counts=False, max_work_items=None):
+    """Read target table schemas (and optional record counts) through the engine before writes."""
+    work = Path(work)
+    if heads is None:
+        heads = tables.resolve_tables(engine=engine, work=work / 'heads', catalog_root=catalog_root, tables=tables_spec)
+    inputs = [tables.table_input(name, head) for name, head in heads.items()]
+    schema_dir = work / 'schemas'
+    run_job(
+        schema_dir, engine, inputs=inputs, steps=[],
+        outputs=[
+            parquet_output(schema_dir, name, f'SELECT * FROM "{name}" WHERE FALSE', list(tables.TABLE_SPECS[name]['primary_key']))
+            for name in heads
+        ],
+    )
+    schemas_out = {}
+    present_by_table = {}
+    for name, head in heads.items():
+        actual = pq.read_schema(schema_dir / f'{name}.parquet')
+        present_by_table[name] = set(actual.names)
+        actual_paths = _arrow_field_paths(pa.struct(actual))
+        expected_paths = writer_field_paths(name)
+        missing = sorted(expected_paths - actual_paths)
+        schemas_out[name] = dict(
+            schema_id=head['schema_id'],
+            snapshot=head['snapshot'],
+            columns=[dict(name=f.name, type=str(f.type), nullable=bool(f.nullable)) for f in actual],
+            compatible=not missing,
+            missing_fields=missing,
+        )
+    counts_out = {}
+    if include_counts:
+        queries = [dict(name=name, sql=_count_query(name, present_by_table[name])) for name in heads]
+        raw_counts = run_job(work / 'counts', engine, inputs=inputs, steps=[], outputs=[], queries=queries)
+        for name in heads:
+            row = raw_counts[name][0]
+            stale = int(row['stale_records'])
+            touch = stale if max_work_items is None else min(stale, int(max_work_items))
+            counts_out[name] = dict(
+                total_rows=int(row['total_rows']),
+                current_rows=int(row['current_rows']),
+                stale_records=stale,
+                would_touch=touch,
+            )
+    return dict(heads=heads, target_schemas=schemas_out, record_counts=counts_out)
+
+
+def verify_target_schemas(heads, *, engine, work):
+    """Refuse before any producer-record write or body fetch if a target table lacks writer fields."""
+    schemas = inspect_targets({}, engine=engine, catalog_root=None, work=work, heads=heads)['target_schemas']
+    incompatible = {name: entry['missing_fields'] for name, entry in schemas.items() if not entry['compatible']}
+    if incompatible:
+        details = '; '.join(f'{name} missing {fields}' for name, fields in sorted(incompatible.items()))
+        raise ValueError(f'Target lake table schema mismatch before write: {details}')
+
+
+def produce_daily(spec,*,engine,raw_store,producer_records=None,verified_heads=None):
     """D1 then budgeted D2 then D3, returning fresh pins only after completion.
 
     Native jobs own table scans, joins, sorting and appends. Each producer builds
@@ -877,7 +1133,11 @@ def produce_daily(spec,*,engine,raw_store,producer_records=None):
             work=work/'unreadable-inventory',qualified=provenance['unreadable']))
     provenance['unreadable']=unreadable_snapshot.rows()
     authority=dict(engine=engine,catalog_root=spec['catalog_root'])
-    heads=tables.resolve_tables(**authority,work=work/'initial-heads',tables=spec['tables'])
+    if verified_heads is not None:
+        heads=dict(verified_heads)
+    else:
+        heads=tables.resolve_tables(**authority,work=work/'initial-heads',tables=spec['tables'])
+        verify_target_schemas(heads,engine=engine,work=work/'target-schemas')
     versions=dict(captures=captures.current_version())
     report=dict(status='running',pins=None,receipt_keys=None,new_receipt_keys=[],provenance=provenance,
                 currentversions=versions,producerreports={})
@@ -949,9 +1209,10 @@ def _produce(spec,engine,raw_store,work,provenance,identities,unreadable_snapsho
             raise ValueError('Selected receipts produced no captures')
     report['producerreports']['captures']=dict(stage=None if stage is None else str(stage),append=None)
     listing=None
+    staged_parquet=None if stage is None else stage/'captures.parquet'
     if _listed_reads(spec,raw_store):
         try:
-            custody=_listed_custody(spec,engine,raw_store,heads,backlog,None if stage is None else stage/'captures.parquet',
+            custody=_listed_custody(spec,engine,raw_store,heads,backlog,staged_parquet,
                 unreadable_snapshot,work/'raw-custody')
         except readings.BackfillRequired as error:
             report.update(status='backfill_required');report['producerreports']['readings']=error.as_dict()
@@ -964,6 +1225,11 @@ def _produce(spec,engine,raw_store,work,provenance,identities,unreadable_snapsho
                 work_list=str(planned['work_list']))
             return report
         listing=custody['listing']
+        scoped_captures,scoped_readings=custody['scoped_captures'],custody['scoped_readings']
+    else:
+        scoped=_scope_daily_inputs(heads,backlog,staged_parquet,engine=engine,
+            output_dir=work/'readings-scope',job_dir=work/'readings-scope/job')
+        scoped_captures,scoped_readings=scoped['captures'],scoped['readings']
     if stage is not None:
         appended=tables.append_rows(stage/'captures.parquet',**authority,work=work/'captures-append',
             table=spec['tables']['captures'],keys=['receipt_key'],definition=manifest['mapping_digest'])
@@ -987,10 +1253,15 @@ def _produce(spec,engine,raw_store,work,provenance,identities,unreadable_snapsho
                     report['producerreports'][step]=passes[step]
                     return report
             else:
+                current_readings=tables.resolve_tables(**authority,work=work/'readings-admitted-head',
+                    tables={'readings':spec['tables']['readings']})['readings']
+                if current_readings!=heads['readings']:
+                    raise ValueError('Readings head changed during daily admission')
                 passes[step]=readings.run(engine=engine,work=work/step,mode='daily',execute=True,
                     max_work_items=spec['max_work_items'],table=spec['tables']['readings'],parser=name,
                     catalog_root=spec['catalog_root'],unreadable_store=raw_store,
-                    captures=heads['captures'],**_body_source(spec,raw_store,work/step,listing),
+                    captures=scoped_captures,read_current=lambda **_:scoped_readings,
+                    **_body_source(spec,raw_store,work/step,listing),
                     decided_at=spec['decided_at'],unreadable_snapshot=unreadable_snapshot)
         except readings.BackfillRequired as error:
             report.update(status='backfill_required');report['producerreports'][step]=error.as_dict()
@@ -999,6 +1270,7 @@ def _produce(spec,engine,raw_store,work,provenance,identities,unreadable_snapsho
             report.update(status='raw_custody_required');report['producerreports'][step]=error.as_dict()
             return report
         report['producerreports'][step]=passes[step]
+        if passes[step].get('carried',{}).get('bodies'):report.setdefault('carried',{})[step]=passes[step]['carried']
         if passes[step]['status']=='pending':break
     parsed=passes['readings']
     versions.update(readings=parsed['parser_version'],parsers={p:readings.current_version(p)
@@ -1027,6 +1299,17 @@ def _produce(spec,engine,raw_store,work,provenance,identities,unreadable_snapsho
     # D4 routes House XML by its current reading, so it reads readings after this run's append.
     readings_head=tables.resolve_tables(**authority,work=work/'readings-head',
         tables={'readings':spec['tables']['readings']})['readings']
+    routed_readings=readings_head
+    if 'meeting_records' in spec['tables'] and 'appearance_records' in spec['tables']:
+        from congress_api.lake._record_producer import ROUTES
+        from congress_api.retention.provenance import parquet_output,run_job
+        routed_parsers=sorted({p for entries in ROUTES.values() for _,_,p,_ in entries if p})
+        routed_list=','.join("'"+p.replace("'","''")+"'" for p in routed_parsers)
+        routed_dir=work/'routed-readings';routed_dir.mkdir(parents=True,exist_ok=False)
+        run_job(routed_dir,engine,inputs=[tables.table_input('readings',readings_head)],steps=[],
+            outputs=[parquet_output(routed_dir,'readings',
+                f'SELECT * FROM readings WHERE parser IN ({routed_list})',readings.PK)])
+        routed_readings=routed_dir/'readings.parquet'
     if 'meeting_records' in spec['tables']:
         meeting_head=tables.resolve_tables(**authority,work=work/'meeting-head',
             tables={'meeting_records':spec['tables']['meeting_records']})['meeting_records']
@@ -1034,7 +1317,7 @@ def _produce(spec,engine,raw_store,work,provenance,identities,unreadable_snapsho
             meetings_staged=meeting_records.stage(captures=heads['captures'],existing=meeting_head,engine=engine,
                 work=work/'meeting-records',local_root=spec.get('local_root'),raw_store=raw_store,
                 unreadable_files=unreadable_snapshot.files(),max_work_items=spec['max_work_items'],
-                decided_at=spec['decided_at'],unreadable_store=raw_store,readings=readings_head)
+                decided_at=spec['decided_at'],unreadable_store=raw_store,readings=routed_readings)
         except readings.BackfillRequired as error:
             report.update(status='backfill_required');report['producerreports']['meeting_records']=error.as_dict()
             return report
@@ -1052,7 +1335,7 @@ def _produce(spec,engine,raw_store,work,provenance,identities,unreadable_snapsho
             appearances_staged=appearance_records.stage(captures=heads['captures'],existing=appearance_head,engine=engine,
                 work=work/'appearance-records',local_root=spec.get('local_root'),raw_store=raw_store,
                 unreadable_files=unreadable_snapshot.files(),max_work_items=spec['max_work_items'],
-                decided_at=spec['decided_at'],unreadable_store=raw_store,readings=readings_head)
+                decided_at=spec['decided_at'],unreadable_store=raw_store,readings=routed_readings)
         except readings.BackfillRequired as error:
             report.update(status='backfill_required');report['producerreports']['appearance_records']=error.as_dict()
             return report
@@ -1308,7 +1591,7 @@ def _activate_record_transition(prepared,*,engine,raw_store,producer_records,cat
 
     def save():
         if disk_usage(work).free<min_disk_bytes:raise ValueError(f'{label} activation reached its disk floor')
-        if sum(path.stat().st_size for path in work.rglob('*') if path.is_file())>max_output_bytes:
+        if sum(path.stat().st_size for path in work.rglob('*') if path.is_file() and path.name!='engine.log')>max_output_bytes:
             raise ValueError(f'{label} activation exceeded its output byte limit')
         durable_json(state_path,state)
 

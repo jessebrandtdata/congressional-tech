@@ -115,6 +115,150 @@
       "source": "s2-site/sample.json p012"
     },
     {
+      "id": "page-signals:site_help_page",
+      "registry": "page-signals",
+      "entry": "site_help_page",
+      "value": "https://docs.house.gov/committee/Help.aspx",
+      "expected": true,
+      "source": "Published release 619db5f9e08e, sources row 286993 (bodies 58f225d6\u2026, c0a3d1b8\u2026): the House Committee Repository's help page, linked as 'Help' from 181 captured pages and published as a document of 81 meetings (ct-aoxp)"
+    },
+    {
+      "id": "page-signals:site_help_page_committee",
+      "registry": "page-signals",
+      "entry": "site_help_page",
+      "value": "https://www.senate.gov/committees/help",
+      "expected": false,
+      "source": "Authored boundary: 'help' as a last path segment with no file extension can name the HELP committee, so only a help page file (help.aspx, help.html) matches"
+    },
+    {
+      "id": "page-signals:site_help_page_govinfo",
+      "registry": "page-signals",
+      "entry": "site_help_page",
+      "value": "https://www.govinfo.gov/help/chrg",
+      "expected": false,
+      "source": "Authored boundary: a page under a /help/ directory is a help article with its own name, not the site's help page"
+    },
+    {
+      "id": "page-signals:govinfo_content_details",
+      "registry": "page-signals",
+      "entry": "govinfo_content_details",
+      "value": "https://www.govinfo.gov/app/details/CHRG-118hhrg53014",
+      "expected": true,
+      "source": "Published release 619db5f9e08e: one of 34,588 GovInfo package Content Details pages published as a document (about 3 KB of site navigation, title 'Serial No. 118-1 - THE STATE OF THE AMERICAN ECONOMY: APPALACHIA - CHRG-118hhrg53014 | Content Details | GovInfo') beside the hearing's own PDF and HTML text (ct-m878)"
+    },
+    {
+      "id": "page-signals:govinfo_content_details_granule",
+      "registry": "page-signals",
+      "entry": "govinfo_content_details",
+      "value": "https://www.govinfo.gov/app/details/CHRG-116hhrg49571/CHRG-116hhrg49571-add1",
+      "expected": true,
+      "source": "Published release 619db5f9e08e: one of 238 granule Content Details pages, here an addendum's, published as a document beside CHRG-116hhrg49571-add1.pdf (ct-m878)"
+    },
+    {
+      "id": "page-signals:govinfo_content_details_file",
+      "registry": "page-signals",
+      "entry": "govinfo_content_details",
+      "value": "https://www.govinfo.gov/content/pkg/CHRG-118hhrg53014/html/CHRG-118hhrg53014.htm",
+      "expected": false,
+      "source": "Authored boundary: the hearing's HTML text under /content/pkg/ is the file a Content Details page describes, never the page"
+    },
+    {
+      "id": "page-signals:govinfo_content_details_api",
+      "registry": "page-signals",
+      "entry": "govinfo_content_details",
+      "value": "https://api.govinfo.gov/packages/CHRG-118hhrg53014/summary",
+      "expected": false,
+      "source": "Authored boundary: the API's package summary is an API page (api_endpoint), not the Content Details page"
+    },
+    {
+      "id": "page-signals:govinfo_details_name",
+      "registry": "page-signals",
+      "entry": "govinfo_details_name",
+      "value": "CHRG-118hhrg53014",
+      "expected": true,
+      "source": "Published release 619db5f9e08e: the last path segment of all 34,826 GovInfo Content Details pages is a package or granule ID; 34,586 are package IDs like this one (review finding 3, 2026-11-10)"
+    },
+    {
+      "id": "page-signals:govinfo_details_name_granule",
+      "registry": "page-signals",
+      "entry": "govinfo_details_name",
+      "value": "CHRG-116hhrg49571-add1",
+      "expected": true,
+      "source": "Published release 619db5f9e08e: one of 238 granule pages (an addendum)"
+    },
+    {
+      "id": "page-signals:govinfo_details_name_volume",
+      "registry": "page-signals",
+      "entry": "govinfo_details_name",
+      "value": "CHRG-109hhrg26292v1",
+      "expected": true,
+      "source": "Published release 619db5f9e08e: one of 2 package IDs with a joined volume suffix"
+    },
+    {
+      "id": "page-signals:govinfo_details_name_subpage",
+      "registry": "page-signals",
+      "entry": "govinfo_details_name",
+      "value": "summary",
+      "expected": false,
+      "source": "Authored boundary: a non-ID sub-page under /app/details/ names no file; it must not attach to another site's summary.pdf"
+    },
+    {
+      "id": "page-signals:govinfo_details_name_words",
+      "registry": "page-signals",
+      "entry": "govinfo_details_name",
+      "value": "related-documents",
+      "expected": false,
+      "source": "Authored boundary: hyphenated words without an upper-case GovInfo collection code are no package or granule ID"
+    },
+    {
+      "id": "page-signals:gpo_printed_hearing_cover",
+      "registry": "page-signals",
+      "entry": "gpo_printed_hearing_cover",
+      "value": "VA FEE BASIS CARE: EXAMINING SOLUTIONS TO A FLAWED SYSTEM HEARING BEFORE THE SUBCOMMITTEE ON HEALTH OF THE COMMITTEE ON VETERANS' AFFAIRS U.S. HOUSE OF REPRESENTATIVES ONE HUNDRED TWELFTH CONGRESS SECOND SESSION SEPTEMBER 14, 2012 SERIAL No. 112-75 Printed for the use of the Committee on Veterans' Affairs U.S. GOVERNMENT PRINTING OFFICE WASHINGTON, DC: 2012",
+      "expected": true,
+      "source": "Published release 77673bfb8fcf: text head of Transcript,Health9-14-12.htm, a recovered copy the committee linked as a transcript; one of 17 documents tagged transcript whose own text is a GPO printed hearing's cover (ct-isnv)"
+    },
+    {
+      "id": "page-signals:gpo_printed_hearing_cover_govinfo_text",
+      "registry": "page-signals",
+      "entry": "gpo_printed_hearing_cover",
+      "value": "[House Hearing, 114 Congress] [From the U.S. Government Publishing Office] CONCUSSIONS IN YOUTH SPORTS: EVALUATING PREVENTION AND RESEARCH ======================================================================= HEARING BEFORE THE SUBCOMMITTEE ON OVERSIGHT AND INVESTIGATIONS OF THE COMMITTEE ON ENERGY AND COMMERCE HOUSE OF REPRESENTATIVES ONE HUNDRED FOURTEENTH CONGRESS SECOND SESSION __________ MAY 13, 2016 __________ Serial No. 114-145 [GRAPHIC NOT AVAILABLE IN TIFF FORMAT] Printed for the use of the Committee on Energy and Commerce energycommerce.house.gov __________ U.S. GOVERNMENT PUBLISHING OFFICE 21-158 PDF WASHINGTON : 2017",
+      "expected": true,
+      "source": "Published release 77673bfb8fcf: text head of Transcript-OI-Hrg-Youth-Concussions-051316.pdf, recovered as GovInfo's text of the printed hearing"
+    },
+    {
+      "id": "page-signals:gpo_printed_hearing_cover_senate",
+      "registry": "page-signals",
+      "entry": "gpo_printed_hearing_cover",
+      "value": "[Senate Hearing 106-24] [From the U.S. Government Publishing Office] S. Hrg. 106-24 TO CONSIDER BUDGET PROCESS REFORM ======================================================================= JOINT HEARING BEFORE THE COMMITTEE ON THE BUDGET AND THE COMMITTEE ON GOVERNMENTAL AFFAIRS UNITED STATES SENATE ONE HUNDRED SIXTH CONGRESS FIRST SESSION __________ JANUARY 27, 1999 __________ Printed for the use of the Committee on Governmental Affairs and the Committee on the Budget U.S. GOVERNMENT PRINTING OFFICE 54-926 cc",
+      "expected": true,
+      "source": "Published release 77673bfb8fcf: text head of CHRG-106shrg54926.htm; a Senate cover states its number before 'HEARING BEFORE THE'"
+    },
+    {
+      "id": "page-signals:gpo_printed_hearing_cover_committee_page",
+      "registry": "page-signals",
+      "entry": "gpo_printed_hearing_cover",
+      "value": "Skip to Main About Chairman Rick Crawford HPSCI Members History & Jurisdiction Subcommittees Committee Rules Legislation Committee Schedule Bills Hearings Business Meetings News Press Releases Videos November 06, 2017 Carter Page hearing transcript released The House Permanent Select Committee on Intelligence released the transcript of its hearing",
+      "expected": false,
+      "source": "Published release 77673bfb8fcf: text head of carter-page-hearing-transcript-released, a committee page about its own transcript; no cover"
+    },
+    {
+      "id": "page-signals:gpo_printed_hearing_cover_banner_only",
+      "registry": "page-signals",
+      "entry": "gpo_printed_hearing_cover",
+      "value": "[Senate Hearing 106-] [From the U.S. Government Publishing Office] DEPARTMENT OF THE INTERIOR AND RELATED AGENCIES APPROPRIATIONS FOR FISCAL YEAR 2004 ---------- U.S. Senate, Subcommittee of the Committee on Appropriations, Washington, DC. NONDEPARTMENTAL WITNESSES [Clerk's note.--The subcommittee was unable to hold hearings on nondepartmental witnesses",
+      "expected": false,
+      "source": "Published release 77673bfb8fcf: text head of CHRG-106shrg2910441.htm; GovInfo's banner alone is no cover"
+    },
+    {
+      "id": "page-signals:gpo_printed_hearing_cover_court_reporter",
+      "registry": "page-signals",
+      "entry": "gpo_printed_hearing_cover",
+      "value": "STENOGRAPHIC TRANSCRIPT OF PROCEEDINGS HEARING BEFORE THE COMMITTEE ON ARMED SERVICES UNITED STATES SENATE TO RECEIVE TESTIMONY ON THE POSTURE OF THE DEPARTMENT OF THE ARMY Washington, D.C. ALDERSON COURT REPORTING 1111 14TH STREET NW SUITE 1050 WASHINGTON, D.C. 20005 (202) 289-2260",
+      "expected": false,
+      "source": "Authored boundary: a court reporter's transcript of a hearing has no hearing number and no GPO imprint; it is the committee's own transcript"
+    },
+    {
       "id": "formats:preference-pdf",
       "registry": "formats",
       "entry": "preference-pdf",
@@ -9318,100 +9462,244 @@
       "source": "Authored boundary: a member outside the container's own directory has no published address"
     },
     {
-      "id": "page-signals:link_word_formats",
-      "registry": "page-signals",
+      "id": "title-rules:link_word_formats",
+      "registry": "title-rules",
       "entry": "link_word_formats",
       "value": "ZIP",
       "expected": true,
       "source": "apps/site/src/components/explorer/archive/archive-metadata.ts:618-626 genericAnchorTitles and isGenericTitle; live 448651e7 titles: ZIP 34,019, PDF 3,731, XML 198, here 44, Download PDF 44, Email 38"
     },
     {
-      "id": "page-signals:link_word_actions",
-      "registry": "page-signals",
+      "id": "title-rules:link_word_actions",
+      "registry": "title-rules",
       "entry": "link_word_actions",
       "value": "Download PDF",
       "expected": true,
       "source": "apps/site/src/components/explorer/archive/archive-metadata.ts:618-626 genericAnchorTitles and isGenericTitle; live 448651e7 titles: ZIP 34,019, PDF 3,731, XML 198, here 44, Download PDF 44, Email 38"
     },
     {
-      "id": "page-signals:link_word_click_here",
-      "registry": "page-signals",
+      "id": "title-rules:link_word_click_here",
+      "registry": "title-rules",
       "entry": "link_word_click_here",
       "value": "Click here for the transcript",
       "expected": true,
       "source": "apps/site/src/components/explorer/archive/archive-metadata.ts:618-626 genericAnchorTitles and isGenericTitle; live 448651e7 titles: ZIP 34,019, PDF 3,731, XML 198, here 44, Download PDF 44, Email 38"
     },
     {
-      "id": "page-signals:link_word_download",
-      "registry": "page-signals",
+      "id": "title-rules:link_word_download",
+      "registry": "title-rules",
       "entry": "link_word_download",
       "value": "Download Witness Testimony (PDF)",
       "expected": true,
       "source": "apps/site/src/components/explorer/archive/archive-metadata.ts:618-626 genericAnchorTitles and isGenericTitle; live 448651e7 titles: ZIP 34,019, PDF 3,731, XML 198, here 44, Download PDF 44, Email 38"
     },
     {
-      "id": "page-signals:link_word_formats_title",
-      "registry": "page-signals",
+      "id": "title-rules:link_word_formats_title",
+      "registry": "title-rules",
       "entry": "link_word_formats",
       "value": "PDF of the Hearing on Rural Transportation",
       "expected": false,
       "source": "Authored boundary: a format word inside a title is not a link word"
     },
     {
-      "id": "page-signals:link_word_download_named",
-      "registry": "page-signals",
+      "id": "title-rules:link_word_download_named",
+      "registry": "title-rules",
       "entry": "link_word_actions",
       "value": "Downloads and Hearing Records",
       "expected": false,
       "source": "Authored boundary: only the whole text is a link word"
     },
     {
-      "id": "page-signals:link_word_format_size",
-      "registry": "page-signals",
+      "id": "title-rules:link_word_format_size",
+      "registry": "title-rules",
       "entry": "link_word_format_size",
       "value": "Download XML (6KB)",
       "expected": true,
       "source": "green-g review of r1b-g: 611 live 448651e7 titles such as \"Download XML (6KB)\"; Run B \"PDF (48.1 MB)\""
     },
     {
-      "id": "page-signals:link_word_format_size_mb",
-      "registry": "page-signals",
+      "id": "title-rules:link_word_format_size_mb",
+      "registry": "title-rules",
       "entry": "link_word_format_size",
       "value": "PDF (48.1 MB)",
       "expected": true,
       "source": "green-g review of r1b-g: 611 live 448651e7 titles such as \"Download XML (6KB)\"; Run B \"PDF (48.1 MB)\""
     },
     {
-      "id": "page-signals:link_word_format_size_title",
-      "registry": "page-signals",
+      "id": "title-rules:link_word_format_size_title",
+      "registry": "title-rules",
       "entry": "link_word_format_size",
       "value": "Testimony of Jane Doe (PDF, 2 MB)",
       "expected": false,
       "source": "Authored boundary: a name beside the format and size is a title"
     },
     {
-      "id": "page-signals:link_word_phrases",
-      "registry": "page-signals",
+      "id": "title-rules:link_word_phrases",
+      "registry": "title-rules",
       "entry": "link_word_phrases",
       "value": "Printable PDF of this Document",
       "expected": true,
       "source": "red-g2 review of r1b-g: link texts that say what a link does"
     },
     {
-      "id": "page-signals:link_word_phrases_report",
-      "registry": "page-signals",
+      "id": "title-rules:link_word_phrases_report",
+      "registry": "title-rules",
       "entry": "link_word_phrases",
       "value": "Download Report",
       "expected": true,
       "source": "red-g2 review of r1b-g: link texts that say what a link does"
     },
     {
-      "id": "page-signals:link_word_format_size_version",
-      "registry": "page-signals",
+      "id": "title-rules:link_word_format_size_version",
+      "registry": "title-rules",
       "entry": "link_word_format_size",
       "value": "Version 2",
       "expected": false,
       "source": "Authored boundary (red-g2): a version or file number is a title, not a format word"
+    },
+    {
+      "id": "title-rules:link_word_no_name",
+      "registry": "title-rules",
+      "entry": "link_word_no_name",
+      "value": "12",
+      "expected": true,
+      "source": "Published release 619db5f9e08e, list.parquet titles taken from link text: 194 with no letter (148 distinct, such as '12', '_3', '16-4', '19-26-03-26-19'), 61 of the form 'no. 3' and one '.'; every one has a filename (ct-ccsi)"
+    },
+    {
+      "id": "title-rules:link_word_no_name_ordinal",
+      "registry": "title-rules",
+      "entry": "link_word_no_name",
+      "value": "no. 3",
+      "expected": true,
+      "source": "Published release 619db5f9e08e: 61 documents titled 'no. 1' to 'no. 9' and 'no 4' from Financial Services amendment lists (bills-119-hres1007-s001213-amdt-1.pdf is 'no. 1')"
+    },
+    {
+      "id": "title-rules:link_word_no_name_mark",
+      "registry": "title-rules",
+      "entry": "link_word_no_name",
+      "value": ".",
+      "expected": true,
+      "source": "Published release 619db5f9e08e: one document titled '.' (ct-ccsi)"
+    },
+    {
+      "id": "title-rules:link_word_no_name_stem",
+      "registry": "title-rules",
+      "entry": "link_word_no_name",
+      "value": "19-26-03-26-19",
+      "expected": true,
+      "source": "Published release 619db5f9e08e: Senate Armed Services transcripts titled by their number and date, the filename stem (19-26-03-26-19.pdf)"
+    },
+    {
+      "id": "title-rules:link_word_no_name_named_number",
+      "registry": "title-rules",
+      "entry": "link_word_no_name",
+      "value": "Amendment No. 3",
+      "expected": false,
+      "source": "Authored boundary: a number after a name is part of the name"
+    },
+    {
+      "id": "title-rules:link_word_no_name_exhibit",
+      "registry": "title-rules",
+      "entry": "link_word_no_name",
+      "value": "Exhibit 3",
+      "expected": false,
+      "source": "Authored boundary (red-g2): an exhibit, appendix, version or file number is a title"
+    },
+    {
+      "id": "title-rules:link_word_no_name_word_no",
+      "registry": "title-rules",
+      "entry": "link_word_no_name",
+      "value": "No",
+      "expected": false,
+      "source": "Authored boundary: the word alone is not a numbering"
+    },
+    {
+      "id": "title-rules:link_word_no_name_other_script",
+      "registry": "title-rules",
+      "entry": "link_word_no_name",
+      "value": "\u4e2d\u6587",
+      "expected": false,
+      "source": "Authored boundary: letters of any script are a name (published title of A_HRC_WG6_4_CHN_2_C.pdf)"
+    },
+    {
+      "id": "title-rules:link_word_bill_placeholder",
+      "registry": "title-rules",
+      "entry": "link_word_bill_placeholder",
+      "value": "H.R. ___",
+      "expected": true,
+      "source": "Release build c03c43da: 33 documents titled 'H.R. ___' (69 bill-number placeholders in all) from another same-bytes copy's link text; all 86 matching link texts are H.R. or S. followed only by underscores (review finding 9, 2026-11-10)"
+    },
+    {
+      "id": "title-rules:link_word_bill_placeholder_senate",
+      "registry": "title-rules",
+      "entry": "link_word_bill_placeholder",
+      "value": "S. ____",
+      "expected": true,
+      "source": "Release build c03c43da: 4 Senate link texts 'S. ____'"
+    },
+    {
+      "id": "title-rules:link_word_bill_placeholder_number",
+      "registry": "title-rules",
+      "entry": "link_word_bill_placeholder",
+      "value": "H.R. 5430",
+      "expected": false,
+      "source": "Authored boundary: a bill with its number is a title"
+    },
+    {
+      "id": "title-rules:link_word_bill_placeholder_named",
+      "registry": "title-rules",
+      "entry": "link_word_bill_placeholder",
+      "value": "S. ___, Traumatic Brain Injury Program Reauthorization Act of 2018.pdf",
+      "expected": false,
+      "source": "Authored boundary: a placeholder followed by the bill's name keeps the name"
+    },
+    {
+      "id": "title-rules:link_word_bill_placeholder_comma",
+      "registry": "title-rules",
+      "entry": "link_word_bill_placeholder",
+      "value": "H.R.___,",
+      "expected": true,
+      "source": "Published release 77673bfb8fcf, live row 58914: bill placeholder without space and with trailing comma (ct-jcnd)"
+    },
+    {
+      "id": "title-rules:link_word_bill_placeholder_hres",
+      "registry": "title-rules",
+      "entry": "link_word_bill_placeholder",
+      "value": "H.Res.___",
+      "expected": true,
+      "source": "Published release 77673bfb8fcf, live row 58928: House resolution placeholder (ct-jcnd)"
+    },
+    {
+      "id": "title-rules:link_word_download_general",
+      "registry": "title-rules",
+      "entry": "link_word_download",
+      "value": "Download General",
+      "expected": true,
+      "source": "Published release 77673bfb8fcf: 2,270 link-text titles starting with 'Download ' such as 'Download General' (542) and 'Download Bio' (96) (ct-jcnd)"
+    },
+    {
+      "id": "title-rules:link_word_download_plural",
+      "registry": "title-rules",
+      "entry": "link_word_download",
+      "value": "Downloads and Hearing Records",
+      "expected": false,
+      "source": "Authored boundary: 'Downloads' in a heading or title is not a download command"
+    },
+    {
+      "id": "title-rules:link_word_filename",
+      "registry": "title-rules",
+      "entry": "link_word_filename",
+      "value": "BILLS-116hr5430rfs.pdf",
+      "expected": true,
+      "source": "Published release ede659a056c0: 513 documents titled by a bare filename from link text, including 'BILLS-116hr5430rfs.pdf' replacing 'H.R. 5430' (ct-jcnd, review finding 9)"
+    },
+    {
+      "id": "title-rules:link_word_filename_spaced",
+      "registry": "title-rules",
+      "entry": "link_word_filename",
+      "value": "S. ___, Traumatic Brain Injury Program Reauthorization Act of 2018.pdf",
+      "expected": false,
+      "source": "Authored boundary: a multi-word title ending in a file extension keeps the name"
     },
     {
       "id": "page-signals:description_templates",
@@ -9476,6 +9764,254 @@
       "value": "description_repeat",
       "expected": 50,
       "source": "Provisional: Round 2 Unit F sets it from the top 50 (host, description) repeats over the replay rows"
+    },
+    {
+      "id": "page-signals:site_home_page",
+      "registry": "page-signals",
+      "entry": "site_home_page",
+      "value": "https://www.govinfo.gov/",
+      "expected": true,
+      "source": "Published release 77673bfb8fcf, list row 95: a web page linked from 35,363 captured pages and published as a document (ct-xj8s); GovInfo's home page"
+    },
+    {
+      "id": "page-signals:site_home_page_query",
+      "registry": "page-signals",
+      "entry": "site_home_page",
+      "value": "https://oversight.house.gov/?option=com_content&view=article&id=1223%253A3-31-11-qwhy-isnt-the-department-of-homeland-security-meeting-the-presidents-standard-on-foiaq&catid=12&Itemid=1",
+      "expected": false,
+      "source": "Authored boundary: an article served at a site's root with a query (a Joomla article, list row 305426) is no home page"
+    },
+    {
+      "id": "page-signals:site_home_page_path",
+      "registry": "page-signals",
+      "entry": "site_home_page",
+      "value": "https://www.senate.gov/committees/help",
+      "expected": false,
+      "source": "Authored boundary: any path after the host is not the home page"
+    },
+    {
+      "id": "page-signals:furniture_docs_house_gov",
+      "registry": "page-signals",
+      "entry": "furniture_docs_house_gov",
+      "value": "https://docs.house.gov/Committee/Committees.aspx?Code=AG00",
+      "expected": true,
+      "source": "Published release 77673bfb8fcf, list row 116601: a web page linked from 583 captured pages and published as a document (ct-xj8s); the Committee Repository committee list"
+    },
+    {
+      "id": "page-signals:furniture_docs_house_gov_meeting",
+      "registry": "page-signals",
+      "entry": "furniture_docs_house_gov",
+      "value": "https://docs.house.gov/Committee/Calendar/ByEvent.aspx?EventID=118730",
+      "expected": false,
+      "source": "Authored boundary: the Repository's meeting page is a meeting's own page, never furniture"
+    },
+    {
+      "id": "page-signals:furniture_docs_house_gov_floor",
+      "registry": "page-signals",
+      "entry": "furniture_docs_house_gov",
+      "value": "https://docs.house.gov/floor/Default.aspx?date=2020-01-06",
+      "expected": false,
+      "source": "Authored boundary: a dated floor schedule (199 published, linked from no captured page) is left a document until the owner decides"
+    },
+    {
+      "id": "page-signals:furniture_agriculture_house_gov",
+      "registry": "page-signals",
+      "entry": "furniture_agriculture_house_gov",
+      "value": "https://agriculture.house.gov/calendar/eventslisting.aspx?EventTypeID=213&Timeframe=All",
+      "expected": true,
+      "source": "Published release 77673bfb8fcf, list row 291515: a web page linked from 582 captured pages and published as a document (ct-xj8s); an event list"
+    },
+    {
+      "id": "page-signals:furniture_agriculture_house_gov_event",
+      "registry": "page-signals",
+      "entry": "furniture_agriculture_house_gov",
+      "value": "https://agriculture.house.gov/calendar/eventsingle.aspx?EventID=3939",
+      "expected": false,
+      "source": "Authored boundary: an event page (list row 291171, linked from 18 pages) is a real page"
+    },
+    {
+      "id": "page-signals:furniture_democrats_agriculture_house_gov",
+      "registry": "page-signals",
+      "entry": "furniture_democrats_agriculture_house_gov",
+      "value": "https://democrats-agriculture.house.gov/calendar/default.aspx?CategoryID=14892&Page=2",
+      "expected": true,
+      "source": "Published release 77673bfb8fcf, list row 288561: a web page linked from 1 captured page and published as a document (ct-xj8s); a calendar page"
+    },
+    {
+      "id": "page-signals:furniture_armedservices_house_gov",
+      "registry": "page-signals",
+      "entry": "furniture_armedservices_house_gov",
+      "value": "https://armedservices.house.gov/calendar/?EventTypeID=213",
+      "expected": true,
+      "source": "Published release 77673bfb8fcf, list row 4: a web page linked from 108 captured pages and published as a document (ct-xj8s); the markups calendar"
+    },
+    {
+      "id": "page-signals:furniture_edworkforce_house_gov",
+      "registry": "page-signals",
+      "entry": "furniture_edworkforce_house_gov",
+      "value": "https://edworkforce.house.gov/calendar/list.aspx?EventTypeID=189",
+      "expected": true,
+      "source": "Published release 77673bfb8fcf, list row 307960: a web page linked from 409 captured pages and published as a document (ct-xj8s); a calendar list"
+    },
+    {
+      "id": "page-signals:furniture_democrats_financialservices_house_gov",
+      "registry": "page-signals",
+      "entry": "furniture_democrats_financialservices_house_gov",
+      "value": "https://democrats-financialservices.house.gov/events/eventslisting.aspx?EventTypeID=575",
+      "expected": true,
+      "source": "Published release 77673bfb8fcf, list row 291524: a web page linked from 88 captured pages and published as a document (ct-xj8s); an event list"
+    },
+    {
+      "id": "page-signals:furniture_transportation_house_gov",
+      "registry": "page-signals",
+      "entry": "furniture_transportation_house_gov",
+      "value": "https://transportation.house.gov/calendar/?EventTypeID=541",
+      "expected": true,
+      "source": "Published release 77673bfb8fcf: the committee calendar, published as a document (ct-xj8s)"
+    },
+    {
+      "id": "page-signals:furniture_democrats_transportation_house_gov",
+      "registry": "page-signals",
+      "entry": "furniture_democrats_transportation_house_gov",
+      "value": "https://democrats-transportation.house.gov/committee-activity/markups",
+      "expected": true,
+      "source": "Published release 77673bfb8fcf, list row 308859: a web page linked from 1,491 captured pages and published as a document (ct-xj8s); the markups index"
+    },
+    {
+      "id": "page-signals:furniture_democrats_waysandmeans_house_gov",
+      "registry": "page-signals",
+      "entry": "furniture_democrats_waysandmeans_house_gov",
+      "value": "https://democrats-waysandmeans.house.gov/committee-activity/markups/all?page=2",
+      "expected": true,
+      "source": "Published release 77673bfb8fcf, list row 281756: a web page linked from 5 captured pages and published as a document (ct-xj8s); the markups index, page 3"
+    },
+    {
+      "id": "page-signals:furniture_democrats_waysandmeans_house_gov_markup",
+      "registry": "page-signals",
+      "entry": "furniture_democrats_waysandmeans_house_gov",
+      "value": "https://democrats-waysandmeans.house.gov/committee-activity/markups/health-markup-3",
+      "expected": false,
+      "source": "Authored boundary: a markup page under the index is a real page"
+    },
+    {
+      "id": "page-signals:furniture_waysandmeans_house_gov",
+      "registry": "page-signals",
+      "entry": "furniture_waysandmeans_house_gov",
+      "value": "https://waysandmeans.house.gov/hearings/",
+      "expected": true,
+      "source": "Published release 77673bfb8fcf, list row 296731: a web page linked from 6 captured pages and published as a document (ct-xj8s); the hearings index"
+    },
+    {
+      "id": "page-signals:furniture_foreignaffairs_house_gov",
+      "registry": "page-signals",
+      "entry": "furniture_foreignaffairs_house_gov",
+      "value": "https://foreignaffairs.house.gov/committee-activity/hearings/all",
+      "expected": true,
+      "source": "Published release 77673bfb8fcf, list row 281758: a web page linked from 8 captured pages and published as a document (ct-xj8s); the hearings index"
+    },
+    {
+      "id": "page-signals:furniture_energy_senate_gov",
+      "registry": "page-signals",
+      "entry": "furniture_energy_senate_gov",
+      "value": "https://www.energy.senate.gov/committee-activity/business-meetings/?mt_page=2",
+      "expected": true,
+      "source": "Published release 77673bfb8fcf, list row 8: a web page linked from 2 captured pages and published as a document (ct-xj8s); the business meetings index, page 2"
+    },
+    {
+      "id": "page-signals:furniture_energy_senate_gov_hearing",
+      "registry": "page-signals",
+      "entry": "furniture_energy_senate_gov",
+      "value": "https://www.energy.senate.gov/hearings/hearings-2019-11-full-committee/",
+      "expected": false,
+      "source": "Authored boundary: a hearing page is a real page"
+    },
+    {
+      "id": "page-signals:furniture_energycommerce_house_gov",
+      "registry": "page-signals",
+      "entry": "furniture_energycommerce_house_gov",
+      "value": "https://republicans-energycommerce.house.gov/news",
+      "expected": true,
+      "source": "Published release 77673bfb8fcf, list row 311317: a web page linked from 125 captured pages and published as a document (ct-xj8s); the news index, where three removed press releases redirect"
+    },
+    {
+      "id": "page-signals:furniture_democrats_budget_house_gov",
+      "registry": "page-signals",
+      "entry": "furniture_democrats_budget_house_gov",
+      "value": "https://democrats-budget.house.gov/news/press-releases",
+      "expected": true,
+      "source": "Published release 77673bfb8fcf, list row 314516: a web page linked from 115 captured pages and published as a document (ct-xj8s); the press release index"
+    },
+    {
+      "id": "page-signals:furniture_budget_house_gov",
+      "registry": "page-signals",
+      "entry": "furniture_budget_house_gov",
+      "value": "https://budget.house.gov/hearings?PageNum_rs=2&",
+      "expected": true,
+      "source": "Published release 77673bfb8fcf, list row 296737: a web page linked from 2 captured pages and published as a document (ct-xj8s); the hearings index, page 2"
+    },
+    {
+      "id": "page-signals:furniture_budget_house_gov_hearing",
+      "registry": "page-signals",
+      "entry": "furniture_budget_house_gov",
+      "value": "https://budget.house.gov/hearing/04/30/2025/the-fiscal-state-of-the-nation",
+      "expected": false,
+      "source": "Authored boundary: a hearing detail page is a real page"
+    },
+    {
+      "id": "page-signals:furniture_democrats_veterans_house_gov",
+      "registry": "page-signals",
+      "entry": "furniture_democrats_veterans_house_gov",
+      "value": "https://democrats-veterans.house.gov/events/roundtables",
+      "expected": true,
+      "source": "Published release 77673bfb8fcf, list row 316713: a web page linked from 73 captured pages and published as a document (ct-xj8s); the roundtables index"
+    },
+    {
+      "id": "page-signals:furniture_humanrightscommission_house_gov",
+      "registry": "page-signals",
+      "entry": "furniture_humanrightscommission_house_gov",
+      "value": "https://humanrightscommission.house.gov/events/hearings",
+      "expected": true,
+      "source": "Published release 77673bfb8fcf, list row 296345: a web page linked from 6 captured pages and published as a document (ct-xj8s); the hearings index"
+    },
+    {
+      "id": "page-signals:furniture_appropriations_house_gov",
+      "registry": "page-signals",
+      "entry": "furniture_appropriations_house_gov",
+      "value": "https://appropriations.house.gov/committee-activity/enacted-legislation/fiscal-year-2020-enacted-legislation",
+      "expected": true,
+      "source": "Published release 77673bfb8fcf, list row 292857: a web page linked from 68 captured pages and published as a document (ct-xj8s); one fiscal year of the enacted-legislation index"
+    },
+    {
+      "id": "page-signals:furniture_science_house_gov",
+      "registry": "page-signals",
+      "entry": "furniture_science_house_gov",
+      "value": "https://science.house.gov/markups?label_id=3506B7CC-B79A-433B-B6BE-5810DC769F84",
+      "expected": true,
+      "source": "Published release 77673bfb8fcf, list row 308856: a markups label listing published as a document (ct-xj8s)"
+    },
+    {
+      "id": "page-signals:furniture_science_house_gov_markup",
+      "registry": "page-signals",
+      "entry": "furniture_science_house_gov",
+      "value": "https://republicans-science.house.gov/markups?ID=1965D20D-9159-418E-8B04-D4445D08A00E",
+      "expected": false,
+      "source": "Authored boundary: a markup page addressed by its ID is a real page"
+    },
+    {
+      "id": "page-signals:furniture_judiciary_senate_gov",
+      "registry": "page-signals",
+      "entry": "furniture_judiciary_senate_gov",
+      "value": "https://www.judiciary.senate.gov/search",
+      "expected": true,
+      "source": "Published release 77673bfb8fcf, list row 317266: the site search page published as a document (ct-xj8s)"
+    },
+    {
+      "id": "title-rules:label_alone",
+      "registry": "title-rules",
+      "entry": "label_alone",
+      "value": "Witness Testimony",
+      "expected": true,
+      "source": "document-normalized.sql:11-14 label list (ct-ccsi), live 77673bfb8fcf: 560 label + witness titles, e.g. \"Biography - Ms. Amy Mathers\" (row 259778)"
     }
   ]
 }

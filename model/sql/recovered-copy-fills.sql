@@ -9,7 +9,7 @@ WITH linked AS (
  JOIN source_files f ON f.source_id=r.source_id
  JOIN source_annotations a ON a.source_id=r.source_id
  -- The recovered body's own page title, read for these bodies only (candidate semi-join).
- LEFT JOIN (SELECT encode(p.body_sha,'hex') AS body_sha,coalesce(nullif(trim(max(p.title)),''),nullif(trim(max(p.heading)),'')) AS title
+ LEFT JOIN (SELECT encode(p.body_sha,'hex') AS body_sha,max(p.reading_title) AS title
   FROM source_annotation_pages p JOIN (SELECT DISTINCT decode(body_sha,'hex') AS sha256 FROM recovered_copy_links) s ON p.body_sha=s.sha256
   WHERE p.status='completed' GROUP BY p.body_sha) t ON t.body_sha=r.body_sha
 ), fields AS (

@@ -1,6 +1,6 @@
 ---
 id: ct-l7uh
-status: in_progress
+status: closed
 deps: []
 links: [ct-umtm]
 created: 2026-11-08T18:59:37Z
@@ -35,3 +35,64 @@ Why the scheduled run cannot take them:
 3. Ordinary capture stores whatever bytes arrive under the target key. It has no expected-hash check, so "import only on qualified identity" cannot hold there.
 
 The maintained path is the ct-rie2/ct-umtm campaign: a version-2 profile whose recovery requirements include these 12 targets (historical_exact), a pinned campaign descriptor with replay candidates and expected sha256 from this ledger, capture_schedule --campaign, then the corpus_recovery qualification and single-writer import. That needs three things: a new requirements parquet in publish-model.json (moves the release), an exact-replay scope entry, and a supervised campaign run (capture-archive.yml takes no --campaign). This is owner-decision work, not a scheduling tweak.
+
+**2026-11-09T21:48:35Z**
+
+2026-11-09 campaign prepared offline (no network, no raw write; nothing fetched or imported). Evidence and scripts: .cache/archive-release/investigations/ct-l7uh-wayback-campaign-20261109/ (l7uh_prepare.py, l7uh_check.py, l7uh_plant.py, l7uh_writer_packet.py, execution-inputs.json).
+
+Inputs (generated from the ledger + wayback-results.json, no typed hashes): cohort/{targets,candidates}.parquet, execution-inputs/recovery-requirements.parquet (12 rows, historical_exact, recovery-identity-v1, historical_only), version-2 capture_profile.json bound to that file, url_state.parquet from the maintained eligibility SQL over release 630164505301's 12 history rows (all eligible/no_satisfying_recovery), capture_scope.json = public scope + 12 literal ^replay$ patterns in 'documents' (local to this execution release only), local release 830efb25ec8f, descriptor execution-inputs/campaign.json sha256 51d2c760adf5a5b1... campaign.plan: 12 retained_candidate_pending. l7uh_check: PASS rows=12 total=31,373,355 max=11,268,337, both set directions; a planted wrong hash FAILs the check and the descriptor refuses it, restored bytes identical. capture_schedule dry run (no --apply, network denied by sandbox): due=12, queue = exactly the 12 replay URLs, none a live target.
+
+OWNER DECISION before import: the engine's url_key unwrap gives 10 of 12 replays their target's key; 2 differ: FEMA.pdf (replay archives '//sites/...') and VA cpg_PTSD (replay 'PTSD-full...PDF' vs target 'PTSD-FULL...pdf'). Oct 31 'exact_replay_validation' compared the replay to the CDX 'original', not to the target literal. Keep as historical_exact, drop, or re-label those two. Also choose the identity evidence basis/match_basis and reviewer for the per-target request (decide() needs a strong identifier on both sides).
+
+publish-model.json: NOT required for capture, import or publication (recoveries publish from retained_import captures + recovery provenance; requirements only label url_state 'satisfied'; none of the 12 targets is in capture scope). Optional 13-row file prepared in optional-model/ if the owner wants the label; fold into the MODS regeneration, not a separate one.
+
+Runbook (clean writer checkout W, uv sync --frozen, hold the shared writer slot; I=<main>/.cache/archive-release/investigations/ct-l7uh-wayback-campaign-20261109; run=$I/writer-run):
+1. Lookup prior work per target: L7UH_PACKET_CONFIG=<target cfg> .venv/bin/python $I/l7uh_writer_packet.py lookup --capture-work $run/scheduler --import-root $run/operations
+2. Preview then capture (private local store only, no R2): .venv/bin/python -m congress_api.cli.capture_schedule --release-root $I/execution-inputs --campaign $I/execution-inputs/campaign.json --work $run/scheduler --engine-config $run/runtime.json --admission-db $run/scheduler/admission.sqlite --request-budget 12 --byte-budget 78878366 --spool-budget 100663296 --workers 1 --files-per-second 1 --max-discovery-jobs 1 --fetcher-binary <pinned source-fetch> --local-store $run/raw-stage [--apply]. Writes: capture journal, frozen receipts and bodies under $run (local create-only). Per-hop entity cap 11,268,338.
+3. Per target: qualify the captured body from raw-stage (as ct-umtm requalify.py), write its packet-config.json (expected url/bytes/sha256 from execution-inputs.json, template, qualification), then freeze-request --receipt <frozen receipt.gz> --request $run/requests/<n>.json --decided-at <UTC> --decided-by <name>; import-keys (prints exact receipt/provenance keys).
+4. Import (the only shared writes, R2 congressional-tech-raw, create-only): import-r2 --campaign $I/execution-inputs/campaign.json --request ... --operations $run/operations --runtime $run/runtime.json --bucket congressional-tech-raw --apply. Writes the body (if absent), receipts/documents/<date>/recovery-campaign-<op>.jsonl.gz and provenance/recoveries/<ts>-<op>.jsonl.
+
+Identity gate before any R2 write: freeze-request and import_candidate require receipt_binding (HTTP 200, literal replay URL, one complete capture whose sha256 and bytes equal the ledger value), verify_local_file of the body against the ledger sha256, qualification 'qualified' (application/pdf for .pdf), campaign membership of the exact target/replay pair, and decide() accepted. Any mismatch stops before import and is kept as evidence. Expected: 12 accepted imports, each body sha256 equal to wayback-not-in-raw.json; then the release owner selects the receipts/provenance in the next coordinated release.
+
+**2026-11-09T21:55:30Z**
+
+2026-11-09 identity measurement (offline; .cache/archive-release/investigations/ct-l7uh-wayback-campaign-20261109/l7uh_identity.py, identity-results.json, identity/). Runs the maintained acceptance.decide() unchanged on records read by identity_source(), one record per side; only body custody, receipt_binding and qualification are stubbed because they need a captured body.
+
+Correction: a literal compare finds 8 of 12 replays differ from their target, not 4. Scheme only: hcfa, legion, developingchild, cssp. Port :80: napawash; crr (also http vs https). Double slash: FEMA. Case and scheme: VA (PTSD-full...PDF). Exact: irs, piie, samhsa, clairemontialoux. The Oct 31 discovery deliberately relaxed the maintained 'row original == target' rule to SURT equality (wayback.py), and that is how these 8 were found.
+
+decide() results by document basis:
+- literal (target: requested_url in our Oct 12/15 capture receipt row; candidate: the CDX original, i.e. the replay suffix): 4 accepted, 8 rejected conflicting_document.
+- engine url_key (derived): 10 accepted; FEMA and VA rejected.
+- SURT/Wayback urlkey (derived on our side; case-folds): 12 accepted, VA included.
+- one shared record (Duke pattern): 12 accepted. A wrong value planted in that record is still accepted, so it checks nothing.
+Plant: a wrong candidate document on an accepted literal row (clairemontialoux) gives rejected conflicting_document.
+Release 630164505301 holds no native ID for any of the 12 (no source, document or recovery row; url_state only), so a meeting/document/package basis cannot be built. Only literal is source-native under the acceptance docstring, and its candidate side is reconstructed from the replay URL because the CDX JSON rows were not retained.
+
+Label: recovery rows look the same with or without requirements. Only the url_state row changes, and it is readable through the Explorer MCP SQL view and the site reader's urlState(). In the unfinished Nov 9 nightly candidate, USAID shows satisfied/qualified_recovery/21ebd7b7, while Duke (recovery published, row 288704, no requirement) shows eligible/no_satisfying_recovery.
+
+Recommendation (owner to confirm): literal basis. Run the campaign on the 4 exact targets: no code change, re-run l7uh_prepare.py on the filtered pairs, 4 requests. Keep the 8 variants as not_in_raw with the spelling reason recorded. Admitting the 6 scheme/port variants would need a named, reviewed match rule in acceptance.py (a code change, separate ticket); putting engine keys into the records needs no code but would present a derived key as a source-native ID. SURT would also admit VA by case-folding, against the module's explicit rule. FEMA and VA stay out under every source-native basis. Fold the requirements rows for the imported targets (and Duke) into the MODS regeneration so their url_state reads satisfied.
+
+**2026-11-09T22:26:09Z**
+
+2026-11-09 live local run (owner decision relayed by the orchestrator: all 12, Wayback urlkey/SURT basis; fetch authorised; the R2 import is run by the orchestrator, not here). Nothing was written to R2 or any remote. Evidence: .cache/archive-release/investigations/ct-l7uh-wayback-campaign-20261109/.
+
+Fetch (UA congressional-tech-recovery/1.0, 1 file/s, one worker, maintained capture_schedule into a private local store writer-run/raw-stage):
+- 12 Wayback CDX rows (separate campaign 87f4cd5d; 3,906 bytes). All HTTP 200, one distinct row each (hcfa listed twice), and every Wayback urlkey equals corpus_recovery.cdx.key(target).
+- Replays run 1: 10 stored. legion stopped at 9,818,347 bytes (response_limit): the scheduler sets each per-request cap to (byte budget minus bytes already fetched)/7, so the prepared budget of 7 x largest body was too small once other bodies had been fetched. piie returned HTTP 500.
+- Retry campaign 0e8a6e97 (those 2 targets only, budget 7 x largest + the rest): both stored. The retry was one request about one minute after the 500.
+- Total fetched: 41,337,398 bytes, including the 9,818,347-byte partial and the 141,790-byte error page.
+Check (shasum/gzip/wc/jq only): L7UH_BODYCHECK PASS ledger=12 matched=12 stored_pairs=12. Two failed-attempt bodies are listed as extras. All 12 also match Wayback's SHA-1 digests (openssl + base32). Planted byte in a copied store (irs): FAIL matched=11, exit 1.
+Identity: per-target records in packets/NN. Target document = cdx.key(literal target) (ours); candidate document = the Wayback CDX urlkey (publisher), with the CDX row, its receipt and body pinned. Both are named-reviewer records: identity_source() cannot read the CDX JSON (a list of arrays) as a receipt-backed record. Difference classes: exact 4, scheme 4, port 80 1, scheme+port 80 1, double slash 1 (FEMA), scheme+case 1 (VA). All 12 qualified (Poppler 26.10). freeze-request and import-keys done (decided_at 2026-11-09T22:40:00Z, decided_by owner-approved-2026-11-09-claude-session). Offline rehearsal of import-r2 against a LocalAdapter: 12 accepted; keys equal import-keys output.
+Import (not run): .cache/archive-release/investigations/ct-l7uh-wayback-campaign-20261109/l7uh_import_r2_commands.sh, 12 commands. Creates 36 keys (12 bodies/sha256/<2>/<sha>, 12 receipts/documents/2026-11-09/recovery-campaign-<op>.jsonl.gz, 12 provenance/recoveries/20261109T224000+0000-<op>.jsonl), listed in import-key-list.json. HEAD-check the body keys first.
+Optional 14-row requirements (USAID + Duke from its own campaign file, checked against its accepted decision + 12): .cache/archive-release/investigations/ct-l7uh-wayback-campaign-20261109/optional-model/recovery-requirements-ct-l7uh-duke-20261109.parquet, sha256 9e7d07e1949986b356c2955b8eb0af75b0e76c129c7e70509ae8942eacafa9d0, 2,807 bytes; for the MODS regeneration.
+
+**2026-11-09T22:42:00Z**
+
+R2 import run by the orchestrator session (owner decision "Fetch and import", create-only). 22:41:06Z to 22:41:35Z, no nightly running, the 12 prepared import-r2 commands unchanged, one at a time (launcher l7uh_orch_import.py loads the nightly's R2 credentials in-process; watchdog peak 0.18 GiB). All 12 operations returned accepted; results in import-results/NN.json.
+Written to congressional-tech-raw: 36 keys, exactly those in import-key-list.json (12 bodies, 31,373,355 bytes; 12 receipts; 12 provenance). Nothing else.
+Checks (l7uh_orch_head.py, HEAD only): 22:30Z all 36 absent with a known-present control present (orch-head-check.json); 22:41:52Z all 36 present with a known-absent control still 404 and each body's stored size equal to its local file (orch-head-after-import.json). Before the import, every packets/NN/body.pdf SHA-256 was recomputed and matched the ct-umtm ledger, the request and the key list.
+Still open: (1) the 14 requirement rows go into the MODS regeneration (owned by the CT session), so until then the 12 targets read eligible/no_satisfying_recovery like Duke did; (2) confirm the 12 recoveries in the first nightly release that reads these receipts; (3) the ct-umtm ledger still says not_in_raw for these pairs and wants a dated follow-up line. VA (letter case) and FEMA (double slash) were admitted knowingly under the owner's "all 12, loose match" decision.
+
+**2026-11-10T05:38:12Z**
+
+2026-11-10: the twelve Wayback recoveries are in published release 619db5f9e08e (recoveries.parquet +13: these twelve and one Duke recovery, ct-umtm; cause-record entries in model/jobs/release-causes/630164505301-619db5f9e08e.json, evidence under .cache/archive-release/release-20261110/causes-2/capture-address/). Their requirement rows ride with the MODS branch (claude/ct-mods-zs48-3aap); the dated follow-up for the ct-umtm ledger is noted there.

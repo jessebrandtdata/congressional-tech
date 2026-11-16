@@ -9,19 +9,19 @@ from congress_api.lake._record_producer import (
     expected_records_sql,
 )
 from congress_api.lake.readings import bundle_version,worker_limits
-from congress_api.lake.versions import version_digest
+from congress_api.lake.versions import ImportClosure,_PLUMBING,version_digest
 from congress_api.models.archive_profile import build_capture_profile
 from congress_api.retention.provenance import file_pin
 
 ROOT=Path(__file__).parents[4]
 PARSERS=('sniff','html','xml','json')
-# Derived readings parsers a release may pin; html_metadata is required only to publish page metadata.
-OPTIONAL_PARSERS=('html_metadata',)
+# Derived readings parsers a release may pin for page metadata or retained feed links.
+OPTIONAL_PARSERS=('html_metadata','house_floor_feed')
 MEETING_SOURCES=('congress_gov','house_xml')
 APPEARANCE_SOURCES=('house_xml','congress_gov','senate_page','mods')
 ENTITY_SOURCES={'meeting_records':MEETING_SOURCES,'appearance_records':APPEARANCE_SOURCES}
 EXPLORER_SOURCES={'video_records':('youtube_cache','youtube_api'),'committee_records':('house_xml',)}
-SELECTED_SOURCES={**ENTITY_SOURCES,**EXPLORER_SOURCES,'playlist_records':('hls',)}
+SELECTED_SOURCES={**ENTITY_SOURCES,**EXPLORER_SOURCES,'playlist_records':('hls',),'transcript_headings':('gpo_html',)}
 
 
 def current_parser_versions(keys=()):
@@ -30,9 +30,11 @@ def current_parser_versions(keys=()):
     Job specs, the selective job and its model template all build their expected
     pins here, so a new source-scoped table cannot be added to one and not the others.
     """
-    from congress_api.lake import readings,meeting_records,appearance_records,video_records,committee_records,playlist_records
+    from congress_api.lake import (readings,meeting_records,appearance_records,video_records,committee_records,playlist_records,
+                                   transcript_headings)
     modules=dict(meeting_records=meeting_records,appearance_records=appearance_records,
-                 video_records=video_records,committee_records=committee_records,playlist_records=playlist_records)
+                 video_records=video_records,committee_records=committee_records,playlist_records=playlist_records,
+                 transcript_headings=transcript_headings)
     result={p:readings.current_version(p) for p in (*PARSERS, *(p for p in OPTIONAL_PARSERS if p in keys))}
     result.update({name:modules[name].current_versions() for name in SELECTED_SOURCES if name in keys})
     return result
@@ -82,22 +84,59 @@ def _copy(value):
     return json.loads(json.dumps(value,ensure_ascii=False,sort_keys=True,separators=(',',':'),allow_nan=False))
 
 
+_MODEL_NON_MODEL_PY = frozenset({
+    *_PLUMBING,
+    'packages/congress_api/src/congress_api/lake/_record_producer.py',
+    'packages/congress_api/src/congress_api/lake/meeting_records.py',
+    'packages/congress_api/src/congress_api/lake/appearance_records.py',
+    'packages/congress_api/src/congress_api/lake/video_records.py',
+    'packages/congress_api/src/congress_api/lake/committee_records.py',
+    'packages/congress_api/src/congress_api/lake/playlist_records.py',
+    'packages/congress_api/src/congress_api/lake/reading_versions.py',
+    'packages/viewer_publication/src/viewer_publication/release_gate.py',
+    'packages/viewer_publication/src/viewer_publication/release_comparison.py',
+})
+
+
+def _locked_model_digest(closure, seed_py):
+    """Hash only the locked packages imported by model Python definitions, not the whole uv.lock."""
+    locked = closure.locked_versions(seed_py, stop=_MODEL_NON_MODEL_PY)
+    return version_digest(packages={}, files={}, values={'locked_imports': locked})
+
+
 def _definition_hashes(root):
-    root=Path(root)
+    root = Path(root).resolve()
     # Source definitions are small metadata, read once each; table data is never opened.
-    files=list((root/'model/sql').glob('*.sql'))
-    files+=list((root/'model/registries').glob('*.json'))
-    files+=list((root/'model/lake').glob('*.json'))
-    package=root/'packages/viewer_publication/src/viewer_publication'
-    files += [package/name for name in ('archive_model.py','archive_model_profile.py','archive_format.py','archive_schema.py','archive_model_lifetimes.py','legislative_data.py',
-        'archive_annotations.py','archive_provenance.py','archive_reviews.py','archive_url_state.py','archive_text_index.py',
-        'lookup_aliases.py','meeting_detail_observations.py','historical_recording_matcher.py')]
-    files += [root/'packages/congress_api/src/congress_api/models/archive_profile.py',root/'uv.lock']
-    files += [root/'packages/congress_shared/src/congress_shared/youtube/youtube-accounts.csv']
-    files += [root/'packages/congress_api/src/congress_api'/name for name in ['lake/readings.py','lake/reading_versions.py',
-        'lake/compatible_versions.py','lake/versions.py','lake/_record_producer.py','lake/meeting_records.py','lake/appearance_records.py',
-        'retention/parser_worker.py','retention/process_resources.py']]
-    return {path.relative_to(root).as_posix():file_pin(path)['sha256'] for path in sorted(set(files))}
+    files = list((root / 'model/sql').glob('*.sql'))
+    files += list((root / 'model/registries').glob('*.json'))
+    files += list((root / 'model/lake').glob('*.json'))
+    files += [
+        root / 'packages/congress_shared/src/congress_shared/youtube/youtube-accounts.csv',
+        root / 'packages/house-naming/src/house_naming/data/guide.json',
+    ]
+    package = Path('packages/viewer_publication/src/viewer_publication')
+    seed_py = [
+        *(package / name for name in (
+            'archive_model.py', 'archive_model_profile.py', 'archive_format.py', 'archive_schema.py',
+            'archive_model_lifetimes.py', 'legislative_data.py', 'archive_annotations.py',
+            'archive_provenance.py', 'archive_reviews.py', 'archive_url_state.py', 'archive_text_index.py',
+            'lookup_aliases.py', 'meeting_detail_observations.py', 'historical_recording_matcher.py',
+        )),
+        Path('packages/congress_api/src/congress_api/models/archive_profile.py'),
+        Path('packages/house-naming/src/house_naming/bill_codes.py'),
+        *(Path('packages/congress_api/src/congress_api') / name for name in (
+            'lake/readings.py', 'lake/reading_versions.py', 'lake/compatible_versions.py', 'lake/versions.py',
+            'lake/model_sql.py', 'lake/_record_producer.py', 'lake/meeting_records.py', 'lake/appearance_records.py',
+            'retention/parser_worker.py', 'retention/process_resources.py',
+        )),
+    ]
+    closure = ImportClosure(root, distributions={'house_naming': ['house-naming-guide']})
+    seen_py, _ = closure.reachable([p.as_posix() for p in seed_py], stop=_MODEL_NON_MODEL_PY)
+    files += list(seen_py)
+    unique_files = sorted(set(files))
+    hashes = {path.relative_to(root).as_posix(): file_pin(path)['sha256'] for path in unique_files}
+    hashes['uv.lock'] = _locked_model_digest(closure, [p.as_posix() for p in seed_py])
+    return dict(sorted(hashes.items()))
 
 
 def capture_profile_record(*,engine_revision,root=ROOT):
@@ -196,7 +235,7 @@ def completeness_checks(*,catalog_version,include_entities=False,
     Run completeness_steps first. Inputs are captures, readings, filename_readings, parser_versions,
     accepted_versions, the selected_readings step, source_files, sniff_facts, body_admissions and
     active_unreadable.
-    The latter is already reduced by supersession, with nullable body_sha256
+    The latter is already reduced by supersession and withdrawal, with nullable body_sha256
     and record_sha string identities. Existing error/size_limit rows settle
     work; missing storage creates neither a row nor an unreadable decision.
     """

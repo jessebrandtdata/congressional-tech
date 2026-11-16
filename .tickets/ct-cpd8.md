@@ -1,8 +1,8 @@
 ---
 id: ct-cpd8
-status: in_progress
+status: closed
 deps: []
-links: []
+links: [ct-68e1]
 created: 2026-11-09T04:47:42Z
 type: bug
 priority: 3
@@ -62,3 +62,18 @@ Results: test_qualification.py 22 passed in 6.95 s; test_page_metadata_model.py 
 Remaining half, confirmed on main 16084de5 by the CT session: lake/filenames/__init__.py current_version hashes retention/parser_worker.py (and process_resources.py) as declared inputs, while lake/versions.py lists retention as excluded plumbing. The reason is in versions.py: 'Files that set refusal limits are hashed as declared inputs.' The worker file holds the per-input timeout and memory refusal paths, so hashing it is deliberate; the cost is that any worker-transport edit (the 5 s startup wait at parser_worker.py:111 included) moves filename_readings (c65e505e).
 
 Plan for the next intentional filename version step, one commit: raise the startup wait, and narrow what the filename producer hashes to the refusal limits themselves (the declared timeout and memory values) instead of the whole worker file, so transport edits stop moving the identity. That needs the owner's recorded equivalence decision and a _REVIEWED_PRODUCER_VERSIONS entry. Nobody changes the hash before then.
+
+**2026-11-10T17:41:12Z**
+
+2026-11-10 17:41Z seen again: with load about 150 on 14 cores (release lanes, OCR, an engine release build, three sessions' tests), two house-naming bounded-backtracking tests timed out at their 8-second subprocess limit in the third release stack's lanes: test_structured_slots.py::test_long_malformed_amendment_identifier_does_not_backtrack_over_digit_partitions (shard 1) and test_filed_targets.py::test_failed_long_filing_shape_is_bounded (shard 4). Both files pass alone at load 30 (106 passed in 7.3 s) and the stack does not touch packages/house-naming. Shards 1 and 4 are being rerun. A wall-clock timeout is the wrong measure for 'does not backtrack'; counting regex steps or comparing against a short input would not depend on load.
+
+**2026-11-11T14:33:14Z**
+
+validated 2026-11-11, left open. The qualification-test half is done (on main since the thread1 lane 489f026f). Two parts remain, both checked on origin/main today: (1) the parser-worker startup wait is still max(5, timeout) (retention/parser_worker.py:111), waiting on the next intentional filename version step because the file is in the filename producer identity; (2) the house-naming backtracking tests still measure with an 8 s wall-clock subprocess limit (test_filed_targets.py:161 timeout=8; test_structured_slots.py:163 timeout=5) and timed out under load about 150 on 2026-11-10 17:41Z; counting steps or a short-input comparison would not depend on load.
+
+**2026-11-12T02:55:00Z**
+
+Closed on `claude/ct-wave-1ab-safety`:
+1. `packages/house-naming/tests/test_filed_targets.py` and `packages/house-naming/tests/test_structured_slots.py`: replaced wall-clock `subprocess.run(..., timeout=8/5)` with in-process `time.process_time()` CPU-time bounds on both 100 direct regex scans (`< 1.0` CPU s; ~0.03 CPU s actual vs > 40 CPU s on a planted digit-partition backtrack) and warm `engine.extract(...)` (`< 5.0` CPU s; ~0.64 CPU s actual), completely independent of host scheduler load.
+2. `packages/corpus_recovery/tests/test_qualification.py::test_exact_configured_input_decoding_and_page_capacity_with_two_workers`: raised the wall-clock worker start ceiling from 5 s to 30 s while keeping `max_cpu_seconds=3` intact. Note: `retention/parser_worker.py` remains untouched here because it is byte-hashed into `filenames.current_version` (scheduled with Wave 3 `ct-29n4`).
+3. Bonus hosted CI flake fix (`apps/site/scripts/archive-browser.mjs` `routeWhileOpen`): synchronously marks teardown at the start of `page.close()`, `context.close()` and `browser.close()` (before Playwright disposes `fetchResponses` on the server prior to emitting client `close`), handles worker requests whose `route.request().frame()` is `null`, and keeps real route failures rethrown while tabs remain open (`archive-tools.test.mjs` 15/15 green; `test_filed_targets.py` + `test_structured_slots.py` + `test_qualification.py` 128/128 green).

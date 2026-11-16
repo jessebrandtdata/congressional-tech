@@ -1,0 +1,76 @@
+---
+id: ct-9j3z
+status: closed
+deps: []
+links: [ct-gc99, ct-ud0b]
+created: 2026-11-10T07:18:55Z
+type: task
+priority: 1
+assignee: mikewolfd
+tags: [gate, release, url_state]
+---
+# Release gate cannot prove url_state bookkeeping from new receipts: it lacks the recheck band's meeting date and the page behind each queued link
+
+Capture and the nightly now run unattended, and every capture night changes url_state. On 2026-11-10 (live 630164505301 to 619db5f9e08e) six value groups (attempts 4,729, last_attempt 4,729, last_status 4,526, last_outcome 4,549, last_good_at 4,218, next_attempt_at 4,739 rows) and two added-URL groups (910 attempted, 1,011 queued) each needed a hand cause, and ct-ud0b's automatic proof refuses a night that has any of them. Measured in .cache/archive-release/investigations/gate-rules-20261110/url-state-real-data.md (script scripts/gr_12_url_state.py there).
+
+What a receipt new to the release implies, and what the gate can already see. The unattended path holds the lake captures table, the live release's receipt-key set and both url_state files. From those alone, with one line per receipt line and requested URL as url_state_lines folds them:
+- attempts = live value + number of new lines: 4,729 of 4,729 changed rows.
+- last_attempt = the newest new line when later than the live value, else unchanged: 4,729 of 4,729.
+- last_status and last_outcome = that newest line's, else unchanged: 4,526 of 4,526 and 4,549 of 4,549.
+- last_good_at = the later of the live value and the newest good new line: 4,218 of 4,218.
+- added URL with attempts: attempts = its new lines and no line in a live receipt: 910 of 910.
+- 4,415 of the 4,729 rows were queued in the live release (attempts 0) and got their first attempt.
+The same fold reproduces attempts on every attempted URL of both releases (1,153,397 and 1,158,722, 0 differences), so the live receipt set and the fold are right.
+
+What the gate cannot see, so nothing was implemented (a partial proof changes no night: the proof is all or nothing and these groups would remain):
+1. next_attempt_at = last_attempt + the interval of the URL's recheck band. All 23 families in model/registries/recheck-intervals.json have the same three bands (7, 28, 365 days) chosen by age = attempt date minus a meeting date. That meeting date comes from the model step url_state_meeting_dates (source_addresses, source_annotation_addresses, document_members, component_meeting_links, meetings_resolved); none is a release table or a gate input. Without it the gate can tell only that the interval is one of the family's three values (true for all 4,729), not that it is the right one. 305 rows keep the live interval, which does not show the band was right to keep; 1 row with a new line moved band; 10 rows changed next_attempt_at with no new line at all (8 from 7 to 365 days, 1 from 7 to 28, 1 from 365 to 7), which by definition no receipt implies.
+2. Queued links (attempts 0, 1,011 added): a queue row exists because some read page links the URL (resolved_link_targets joined to good page contexts) and scope admits it. None of the 1,011 has a capture line. The gate holds neither the readings nor the model's link tables, so it cannot name the page, let alone show the page came from a new receipt rather than from an old page read late or a scope change.
+
+Ruled out as unsound: accepting any registry interval of the family (cannot see a wrong band); accepting the live row's interval (same); rebuilding the meeting date in the gate from sources, detail.meeting_keys and meetings (an approximation of a four-way union over model-internal tables, and a second copy of the rule).
+
+## Acceptance Criteria
+
+Decide and build one of: (a) the publisher passes the gate, as pinned files beside the candidate, the per-URL meeting date the schedule used (url_state_meeting_dates) and, per queued URL, the page body and address it was found on; or (b) url_state publishes the band (interval id or meeting date) so the release itself carries it. Then the automatic proof accepts a url_state row only when: attempts, last_attempt, last_status, last_outcome and last_good_at are exactly what the lines of receipts absent from the live set imply (rules above), each line confirmed in raw; next_attempt_at equals last_attempt plus the registry interval for the family and the supplied meeting date, and that meeting date is unchanged from the live build or the row stays non-automatic; nothing else on the row moved; an added queued URL is linked only from pages whose every capture line is in a new receipt. Still refused: an attempt count that falls, a last_good_at that is lost or moves without a stored line, any change with no new line (the 10 interval-only rows), a tie in time with the live value, capture_disposition, capture_reason and capture_decision_id changes, and a removed URL. Tests plant each of those. On the 2026-11-10 pair the counts above are reproduced by the gate's own code, and the decision whether ct-ud0b's rule that an attempted URL must have supplied a new document (349 of 910 do) is replaced by the bookkeeping rule is recorded.
+
+
+## Notes
+
+**2026-11-10T07:19:12Z**
+
+2026-11-10: url_state is not the only thing that stops a capture night. By ct-ud0b's rule, additions on documents the live release already has also refuse the automatic proof, and last night had 201 such link keys, 1,038 addresses and 1,321 lookup-key rows (investigations/gate-rules-20261110/gc99-real-data.md), plus 2,953 sources rows whose link_text and listed_on were filled from newly read pages. Whether those can be traced to new receipts the same way is not measured here.
+
+**2026-11-10T13:16:36Z**
+
+Owner decision 2026-11-10: publish the missing facts. Add the meeting date behind each recheck band and the page behind each queued link to the release so the gate can prove next_attempt_at and queued rows.
+
+**2026-11-10T13:27:30Z**
+
+2026-11-10 status: builder started in wt/ct-9j3z-gate-facts (branch claude/ct-9j3z-gate-facts off the stack); report at .cache/archive-release/investigations/gate-facts-20261110/README.md. Until it lands, a capture night still needs a hand cause record.
+
+**2026-11-10T15:49:53Z**
+
+2026-11-10 15:49Z review fixes landed on the stack (claude/ct-next-release-2, 10 commits ending 717e1f93; source branch claude/ct-9j3z-gate-fixes 9274aeca): raw line compared with its own requested_url; good fetch judged by the model's own steps; a release without the new columns refuses with one reason; first schedules carrying a meeting date capped at 2,000 per unattended night, tied by a written note to the capture's nightly request budget (the first figure, 500, rested on a wrong estimate: at least 663 last night, 630 from one ordinary capture day); tests for the unpinned checks (14 of 14 mutants killed); one projected scan of the capture input. Reports: .cache/archive-release/investigations/gate-facts-20261110/README.md (round 2) and investigations/next-release-review-20261110/gate/REVIEW.md. STILL TO CONFIRM on a full build and the first real night: the join plan and column selection on the remote snapshot; that the lake's requested_url equals the raw value; multi-line receipts and lines requesting several URLs (they refuse; how many is unknown); the real first-schedule count against the cap; the 7 already-scheduled rows the stand-in could not judge; the real size of linked_from; that the first night after the columns ship refuses with the missing-columns reason; no test yet drives the url_state proof through the publish step. Not done: raw receipts are read one request at a time (1,032 today, 5,850 last night); the store client has no batched read.
+**2026-11-10T14:05:12Z**
+
+2026-11-10 branch claude/ct-9j3z-gate-facts (51c692fc model, 2a011465 gate). Report: .cache/archive-release/investigations/gate-facts-20261110/README.md.
+Published: url_state.recheck_meeting_date (date32, the band's date; null on queued rows) and url_state.linked_from (list<fixed[8]>, every read page behind a queued link; empty on fetched rows). Cost on last night's 17.9 MB table: about 0.6 MB (+3.2%); the page list measured on a proxy.
+Gate: automatic_causes proves url_state row by row from the lines of the candidate's receipts outside the live set, folded by the model's own url_state_lines/latest/band steps on the capture table (no second copy), each line in raw naming its address; queued pages traced like new bodies. A scheduled address must keep its live meeting date; a first schedule takes the published one (stated limit). Decided and recorded: the bookkeeping rule replaces ct-ud0b's "an added attempted URL must supply a new document". Still all or nothing.
+Replay with the gate's code on 630164505301 -> 619db5f9e08e (stand-in date, raw not read, pages not traced): 910/910 attempted and 1,011/1,011 queued additions pass; not implied: the 10 no-new-line band changes, 1 moved date on a scheduled address (CHRG-119shrg64381.pdf), 1 removed queued spelling; 273 stand-in artifacts (266 pass with the real column, 7 unknown). A full model build of both releases must confirm, and a real night must show raw lines carry requested_url verbatim.
+
+**2026-11-10T15:22:37Z**
+
+2026-11-10 review fixes, branch claude/ct-9j3z-gate-fixes (d961da46..2cf5d7c0 + docs). Report: .cache/archive-release/investigations/gate-facts-20261110/README.md (Round 2).
+1. A raw line must carry its own requested_url equal to the capture's address; none refuses (W2b fixed). 2. last_good_at is judged by the model's own good-fetch steps run in the gate's job, exactly as url-state.sql folds it (W12, W12b fixed). 3. One plain reason when either release lacks recheck_meeting_date or linked_from, never a crash (W10, W10b fixed). 4. AUTOMATIC_FIRST_SCHEDULE_CAP = 500 beside AUTOMATIC_ADDITION_CAP, one helper over_cap. Measured since: at least 663 first schedules carried a date on the 2026-11-10 pair, 630 from the single 2026-11-08 capture day, so 500 stops a capture day like it; the decision's "about 360" came from a stand-in. Value left to the coordinator. 5. Seven surviving checks pinned; 14 of 14 mutants killed. 6. One engine job, one scan of 17 of 42 capture columns, url_state files joined once in the gate; raw reads still one GET per receipt (1,032 today, 5,850 last night). 7. Two unreachable rules deleted; registry via registry_inputs.
+The reviewer's 23 cases rerun: W2b, W12, W12b and W10, W10b now refuse; W4, W4b (cap), W6, W7, W8 (documented trust) and the two controls pass.
+
+**2026-11-10T20:38:46Z**
+
+2026-11-10 COLUMNS SHIPPED, proof not yet seen working; left open. Checked on published release 77673bfb8fcf (2026-11-10T20:27:52Z) against 619db5f9e08e with DuckDB on the published tables. url_state.parquet now carries recheck_meeting_date (405,960 of the 1,159,761 attempted rows have one; 0 of the 41,175 queued rows) and linked_from (every one of the 41,175 queued rows lists at least one page, at most 2,332; fetched rows list none). On this release the gate had no base values (the published run's release-gate.json cannot_see: both columns 'new in the candidate; no base values to compare'), so the night's 1,061 changed and 327 added url_state rows were explained by hand in the cause record, as designed. What tonight's nightly will show: it is the first comparison where both releases carry the columns, so the automatic url_state proof runs for real. If the night reads new capture or relist receipts, the gate either accepts every url_state change those receipts imply or names the rows it cannot prove. With no new receipts, url_state should not change at all; any change with no new line (the 10 interval-only rows of the 11-10 pair) still refuses. Still to confirm from the 15:49Z list: raw lines carry requested_url verbatim; how many multi-line receipts refuse; the real first-schedule count against the 2,000 cap; a test through the publish step; batched raw reads (not built). Close after the first real capture night passes or is refused for a named, correct reason.
+
+**2026-11-11T14:35:33Z**
+
+validated 2026-11-11, left open: waits on the first real capture night. The columns are live: DuckDB on 77673bfb8fcf's url_state.parquet today gives 1,200,936 rows, 405,960 with recheck_meeting_date, 41,175 with a non-empty linked_from. The automatic proof has not yet run on a pair where both releases carry them with new receipts: the 20261111T103005Z nightly (ef906694) read 0 new receipts and ended release_unchanged. Remains: one capture night through the gate, then the 15:49Z confirm list (join plan on the remote snapshot, raw requested_url equal to the lake's, multi-line receipts, the real first-schedule count against the 2,000 cap).
+
+**2026-11-12T21:45:32Z**
+
+2026-11-12 owner decision (15:06-05:00): a forced workflow_dispatch capture plus a manual Mac nightly counts as Wave 7 acceptance; schedules (03:23 UTC capture, 05:30 local nightly) stay enabled. Evidence: hosted capture-archive.yml run 43302430173 (event workflow_dispatch, main 9924b385, environment archive-capture with ARCHIVE_CAPTURE_R2_* secrets set 14:50-05:00) green in 22m47s; meetings relist 20261112T204014Z-4f9efb076145 + budgeted capture 20261112T204110Z-fc2d35e98d37 from release 750a2a24d00a (2,000 requests, 1,085 captures, 152 MB). Nightly 20261112T210256Z ingested 1,142 new receipts and refused at the gate; cause record model/jobs/release-causes/750a2a24d00a-6c46b8f7a606.json (55 groups, evidence .cache/archive-release/investigations/capture-night-20261112/) committed 0695e4ba; resume 20261112T213624Z published 6c46b8f7a606 at 21:40Z (unpin + notes f5cbc687, docs/releases/2026-11-12-6c46b8f7a606.md). Hosted MCP pinned (ca808760), version 8b2ed383, smoke green on 6c46b8f7a606. Published release adds 21 meetings dated after Release 5 (e.g. 119589, 119594, 119596, 119597, 338823-338832; dated 2026-11-17..19). First capture night through the gate: the automatic url_state proof accepted every changed/added url_state group (591 changed, 551 attempted + 520 queued additions; not named in automatic_reasons). It refused only url_state removed URLs (-527): never-attempted democrats-science.house.gov '&download=1' queued spellings whose repaired '?download=1' spelling was attempted that night (527/527). Proof stays all-or-nothing, so non-url_state groups (link text/titles from newly read pages, re-keyed recovered copies, recordings) still need a hand cause record on capture nights; follow-up worth filing: teach the proof the repaired-spelling removal and the additions-from-new-readings groups.

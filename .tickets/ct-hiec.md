@@ -1,6 +1,6 @@
 ---
 id: ct-hiec
-status: in_progress
+status: closed
 deps: []
 links: [ct-4jms, ct-082q]
 created: 2026-11-08T17:33:29Z
@@ -22,3 +22,23 @@ Moved out of ct-082q's acceptance criteria (owner decision 2026-11-08). New HTML
 **2026-11-09T16:34:36Z**
 
 2026-11-09: the daily path already reads new HTML (publish-daily derived_parsers html_metadata, since d2ec0211). Three things blocked an unattended run. Capture was not scheduled (ct-4jms runbook). The pass spent 93% of its time on per-body commits (ct-z4i9, fixed: one commit per pass). And nothing proved scheduled-capture families reach the nightly: added test_capture_scheduler.py::test_every_capture_family_is_one_the_nightly_ingests (capture-scope.json families are a subset of publish-daily receipt_families). One case remains: a day with more than 64 MiB stored or more than 5,000 new HTML bodies stops the nightly at derived_budget_required and needs a supervised scoped run. Reading at most one budget per night and publishing the rest later would change the publish gate, so that is an owner decision; not changed here.
+
+**2026-11-09T21:59:09Z**
+
+2026-11-09 implemented on claude/ct-hiec-carry-budget: _daily_html_metadata narrows an over-budget scope to the oldest budget's worth (_carry_html_metadata: one native job, oldest receipt (day,key) then hash, O(W log W)) and reports carried bodies/stored_bytes (producer report, top-level report['carried'], daily-summary.json). Status stays completed. Gate: archive_publish_job.produce_daily_inputs publishes only status=='completed'; model tolerates unread html_metadata (document-page-metadata.sql outcome 'unread'; profile-completeness.sql checks only sniff/html/xml/json), so no gate change. Unknown stored sizes still refuse; one oversized body reads alone. Tests: test_daily_html_over_budget_reads_the_oldest_budget_and_carries_the_rest[count|bytes] (each body read once over 3 nights, no duplicate rows, gate-5 records); 8 affected files 331 passed. Planted no-carry, newest-first, ignore-bytes and dropped-report variants: each failed the new test.
+
+**2026-11-09T22:41:56Z**
+
+2026-11-09 review fixes on claude/ct-hiec-carry-fixes: (1) unknown stored size counts as max_bytes+1 in the carry and triggers it when the list has >1 body, so on R2 it is read alone (exempt from the post-custody byte gate) instead of refusing every night; carried.stored_bytes stays known sizes, plus unknown_sizes and oldest_day. (3) SQL joins from work_list/admitted (small side); identical outputs to ae218288 on the fixture (3 carry calls compared). (4) day pattern from RECEIPT_DAY.pattern. (5) nightly summary.json daily_carried. (6) docs and ct-4jms corrected. Unreachable re-admit refusal deleted. Tests: two-day/two-family ordering, count vs bytes, single oversized body, R2 unknown-size carry, local unknown-size refusal opens no body; nightly record_daily. Focused 9 files: 357 passed (partial). Planted 8 failures, each caught. Local path: an unknown size still refuses permanently (kept per instruction).
+
+**2026-11-10T01:14:01Z**
+
+2026-11-10: rebased on main b3c937a8, tip 72e8b1a9. Tested: production-offline as six shards, all exit 0 (12,344 passed), and storage-loopback (full lane) exit 0; logs in .cache/archive-release/ct-hiec-lanes-72e8b1a9/. The two earlier single-process lanes (0ba6e7d1) failed only six site-reader tests because the worktree had no apps/site node_modules. Held out of main until the release is published: it changes the nightly's daily step, and the release build changes one thing at a time (architect review 2026-11-10). Merge and push right after the pointer moves.
+
+**2026-11-10T13:27:30Z**
+
+2026-11-10 status: merged to main in 0fad483d (one budget per night, the rest carried). Three scheduled or hand-run nightlies have run with it since; the 12:15Z run ended release_unchanged, so it has not yet been seen reading a night's new HTML pages under the budget and carrying a remainder. Left: observe one such night (run folder steps.jsonl now records it) and state the numbers here; then close.
+
+**2026-11-11T14:40:09Z**
+
+validated 2026-11-11, closing: on main since 0fad483d, and seen working unattended. The capture of 2026-11-10 14:03Z (1,032 receipts, 1,027 HTTP 200) was read by the driver's own nightly at 18:58Z (run 20261110T185807.402472Z, launched through the launch agent, daily_status completed); the rebuild at 19:53Z (published as 77673bfb8fcf) found the html_metadata work list empty (candidate-rebuilt/archive-daily/html_metadata-scoped/readings/plan/work-list.parquet: 0 rows of a 2,516-body scope), so every new page had been read. readings took 2 commits for it (ct-1mq9). Not seen: a night that exceeds the 64 MiB budget and carries a remainder (no summary.json has had daily_carried); the carry path is covered by its lane tests (six shards green on 72e8b1a9).

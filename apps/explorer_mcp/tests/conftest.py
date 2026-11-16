@@ -66,19 +66,33 @@ def phase2(tmp_path_factory):
         write('witnesses', """SELECT 'appearance-'||i AS witness_key,'meeting:'||i AS occasion,
             CASE WHEN i=1 THEN 335321::BIGINT ELSE (118000+i)::BIGINT END AS event_id,
             CASE WHEN i=2 THEN 'CHRG-118hhrg1' END AS package_id,NULL::VARCHAR AS page_url,
-            'Alex Smith' AS name,'Director' AS position,'Transit Lab' AS organization,
+            'Alex Smith' AS name,CASE WHEN i=1 THEN 'Lt. Gen.' END AS rank,CASE WHEN i=1 THEN 'USAF' END AS credentials,
+            'Director' AS position,'Transit Lab' AS organization,
             NULL::VARCHAR AS on_behalf_of,NULL::VARCHAR AS location,'Panel A' AS panel,
             1::SMALLINT AS panel_order,i::SMALLINT AS display_order,'public' AS witness_type,
-            true AS testified,NULL::VARCHAR AS bioguide_id,NULL::VARCHAR AS superseded_by FROM range(1,3) t(i)
+            true AS testified,NULL::VARCHAR AS bioguide_id,NULL::VARCHAR AS superseded_by,
+            NULL::VARCHAR AS matched_bioguide_id,NULL::VARCHAR AS match_basis FROM range(1,3) t(i)
             UNION ALL
             SELECT * FROM (VALUES
-                ('0001497931f99cd1','page:1',NULL::BIGINT,NULL::VARCHAR,NULL::VARCHAR,'Jordan Taylor','Counsel','Policy Group',NULL::VARCHAR,NULL::VARCHAR,NULL::VARCHAR,NULL::SMALLINT,1::SMALLINT,'public',NULL::BOOLEAN,NULL::VARCHAR,NULL::VARCHAR),
-                ('0000b43c099edbc2','package:1',NULL::BIGINT,'CHRG-118hhrg1',NULL::VARCHAR,'Jordan Taylor','Counsel','Policy Group',NULL::VARCHAR,NULL::VARCHAR,NULL::VARCHAR,NULL::SMALLINT,2::SMALLINT,'public',NULL::BOOLEAN,NULL::VARCHAR,NULL::VARCHAR),
-                ('mods-appearance-1','package:2',335321::BIGINT,'CHRG-118hhrg1',NULL::VARCHAR,'A. Smith','Director','Transit Lab',NULL::VARCHAR,NULL::VARCHAR,NULL::VARCHAR,NULL::SMALLINT,1::SMALLINT,'public',NULL::BOOLEAN,NULL::VARCHAR,'appearance-1')
+                ('0001497931f99cd1','page:1',NULL::BIGINT,NULL::VARCHAR,NULL::VARCHAR,'Jordan Taylor',NULL::VARCHAR,'Ph.D.','Counsel','Policy Group',NULL::VARCHAR,NULL::VARCHAR,NULL::VARCHAR,NULL::SMALLINT,1::SMALLINT,'public',NULL::BOOLEAN,NULL::VARCHAR,NULL::VARCHAR,NULL::VARCHAR,NULL::VARCHAR),
+                ('0000b43c099edbc2','package:1',NULL::BIGINT,'CHRG-118hhrg1',NULL::VARCHAR,'Jordan Taylor',NULL::VARCHAR,'Ph.D.','Counsel','Policy Group',NULL::VARCHAR,NULL::VARCHAR,NULL::VARCHAR,NULL::SMALLINT,2::SMALLINT,'public',NULL::BOOLEAN,NULL::VARCHAR,NULL::VARCHAR,NULL::VARCHAR,NULL::VARCHAR),
+                ('mods-appearance-1','package:2',335321::BIGINT,'CHRG-118hhrg1',NULL::VARCHAR,'A. Smith','Lt. Gen.','USAF','Director','Transit Lab',NULL::VARCHAR,NULL::VARCHAR,NULL::VARCHAR,NULL::SMALLINT,1::SMALLINT,'public',NULL::BOOLEAN,NULL::VARCHAR,'appearance-1',NULL::VARCHAR,NULL::VARCHAR),
+                -- A sitting Member acting officially, matched by name and term dates: a name alone at a Member Day hearing (ct-kw85).
+                ('member-appearance-1','package:9',NULL::BIGINT,'CHRG-118hhrg9',NULL::VARCHAR,'The Honorable Sam Example',NULL::VARCHAR,NULL::VARCHAR,NULL::VARCHAR,NULL::VARCHAR,NULL::VARCHAR,NULL::VARCHAR,NULL::VARCHAR,NULL::SMALLINT,1::SMALLINT,'member_appearance',NULL::BOOLEAN,NULL::VARCHAR,NULL::VARCHAR,'A000001','member_day')
             )""")
         write('witness_key_map', """SELECT 'old-appearance-1' AS old_key,'appearance-1' AS witness_key,
             'unambiguous' AS status,'occurrence' AS basis,[]::VARCHAR[] AS candidate_keys,
             'meeting:1' AS occasion,'senate_page' AS source""")
+        write('people', """SELECT 'aa11bb22cc33dd44' AS person_key,NULL::VARCHAR AS bioguide_id,'Alex Smith' AS name,
+            ['Alex Smith','A. Smith'] AS name_variants,'Transit Lab' AS organization,
+            ['Transit Lab'] AS organizations,['Director'] AS positions,['Lt. Gen.'] AS ranks,'name_organization' AS grouping_basis,
+            2::INTEGER AS appearance_count,2::INTEGER AS hearing_count,DATE '2025-01-10' AS first_seen_date,
+            DATE '2025-02-10' AS last_seen_date,['appearance-1','appearance-2'] AS witness_keys
+            UNION ALL
+            SELECT 'A000001','A000001','Sam Example',['The Honorable Sam Example'],NULL::VARCHAR,
+            []::VARCHAR[],[]::VARCHAR[],[]::VARCHAR[],'bioguide',1::INTEGER,1::INTEGER,DATE '2025-03-01',DATE '2025-03-01',['member-appearance-1']""")
+        write('person_aliases', """SELECT '0011223344556677' AS old_person_key,'aa11bb22cc33dd44' AS person_key,
+            'unambiguous' AS status,'regrouped' AS kind,NULL::VARCHAR AS decision_id,repeat('0',64) AS last_release_id,[]::VARCHAR[] AS candidate_keys""")
         write('recordings', """SELECT 'youtube:abc' AS video_key,[118001::BIGINT, 335321::BIGINT] AS event_ids,
             [struct_pack(body:=unhex(repeat('55',32)),suffix:='.gz',format:='vtt',language:='en',production:='automatic')] AS tracks""")
         write('caption_resources', """SELECT NULL::VARCHAR AS video_key,NULL::BLOB AS track_body,NULL::BIGINT AS ordinal,
@@ -141,6 +155,9 @@ def phase2(tmp_path_factory):
             'February 1, 2025 14:30' AS vote_date,repeat('5',64) AS source_generation,
             'generations/roll-call-votes/source/member_votes.parquet' AS source_reference
             FROM (VALUES ('bioguide:A000001','A000001'),('lis:S001',NULL)) v(member_key,bioguide_id)""")
+        write('corrections', """SELECT 'https://fixture.test/wrong.pdf' AS original_url,unhex(repeat('66',32)) AS rejected_body,
+            'dec-1' AS decision_id,TIMESTAMP '2025-01-03 00:00:00' AS decided_at,
+            'https://archive.example/wrong.pdf' AS recovered_url,'Wrong copy rejected' AS identity_note""")
         write('future_data', "SELECT 'new published column' AS future_field,42.123456789012345678::DECIMAL(38,18) AS amount")
     # Read only the producer-owned JSON. The MCP runtime has no producer dependency.
     (root / 'schema.json').write_bytes((REPO / 'model/registries/release-schema.json').read_bytes())

@@ -32,10 +32,23 @@ def _empty_struct(**fields):
     return f'array_slice(make_array(named_struct({args})),1,0)'
 
 
-NULL_MEETING_DOCUMENT_REFERENCES = 'CASE WHEN false THEN ' + _empty_struct(
+NULL_LAKE_MEETING_DOCUMENT_REFERENCES = 'CASE WHEN false THEN ' + _empty_struct(
     collection='cast(NULL AS VARCHAR)', ordinal='cast(NULL AS INT)', url='cast(NULL AS VARCHAR)',
     role='cast(NULL AS VARCHAR)', format='cast(NULL AS VARCHAR)', description='cast(NULL AS VARCHAR)',
     name='cast(NULL AS VARCHAR)') + ' END'
+
+
+NULL_MEETING_DOCUMENT_REFERENCES = 'CASE WHEN false THEN ' + _empty_struct(
+    collection='cast(NULL AS VARCHAR)', ordinal='cast(NULL AS INT)', url='cast(NULL AS VARCHAR)',
+    role='cast(NULL AS VARCHAR)', format='cast(NULL AS VARCHAR)', description='cast(NULL AS VARCHAR)',
+    name='cast(NULL AS VARCHAR)', listing_status='cast(NULL AS VARCHAR)',
+    last_listed_on='cast(NULL AS DATE)', unlisted_since='cast(NULL AS DATE)',
+    unlisted_by_record_sha='cast(NULL AS VARCHAR)') + ' END'
+
+
+EMPTY_UNLISTED_SUBJECTS = _empty_struct(
+    subject_key='cast(NULL AS VARCHAR)', last_listed_on='cast(NULL AS DATE)',
+    unlisted_since='cast(NULL AS DATE)', unlisted_by_record_sha='cast(NULL AS VARCHAR)')
 
 
 EMPTY_ALTERNATES = _empty_struct(format='cast(NULL AS VARCHAR)', body="arrow_cast(NULL,'FixedSizeBinary(32)')",
@@ -64,7 +77,7 @@ PAGE_DEFAULTS = dict(description='cast(NULL AS VARCHAR)', published_on='cast(NUL
 
 
 LIST_COLUMNS = ['filename', 'title', 'document_kind', 'document_family', 'committee_keys', 'chambers',
-    'congress', 'format', 'document_date', 'first_captured', 'date_kind', 'saved_kind', 'hidden',
+    'congress', 'format', 'document_date', 'document_date_status', 'first_captured', 'date_kind', 'saved_kind', 'hidden',
     'meeting_keys', 'measure_keys', 'bioguide_ids', 'witness_keys', 'version_keys']
 
 
@@ -73,7 +86,7 @@ PAGE_COLUMNS = ['description', 'published_on', 'modified_on', 'publisher_labels'
 
 
 DETAIL_COLUMNS = ['link_key', 'saved_body', 'saved_suffix', 'saved_media_type', 'saved_bytes',
-    'document_date_source', 'document_date_status', 'in_archive_since', 'removed_on', 'review_note', 'review_decided_at',
+    'document_date_source', 'title_source', 'in_archive_since', 'removed_on', 'review_note', 'review_decided_at',
     'src_start', 'src_len', 'rec_start', 'rec_len', 'alternates', 'package_id', 'facts', *PAGE_COLUMNS]
 
 
@@ -93,10 +106,10 @@ DOCUMENT_DATE_STATUS = """CASE WHEN document_date IS NULL THEN NULL
 DOCUMENT_COLUMNS = [*DETAIL_COLUMNS, *LIST_COLUMNS]
 
 
-LIST_DICTIONARY = [*(f'{name}.list.item' for name in ['document_kind', 'document_family', 'committee_keys', 'chambers', 'meeting_keys', 'measure_keys', 'bioguide_ids', 'witness_keys', 'version_keys']), 'format', 'date_kind', 'saved_kind']
+LIST_DICTIONARY = [*(f'{name}.list.item' for name in ['document_kind', 'document_family', 'committee_keys', 'chambers', 'meeting_keys', 'measure_keys', 'bioguide_ids', 'witness_keys', 'version_keys']), 'format', 'document_date_status', 'date_kind', 'saved_kind']
 
 
-DETAIL_DICTIONARY = ['saved_suffix', 'saved_media_type', 'document_date_source', 'document_date_status', 'alternates.list.item.format', 'alternates.list.item.suffix', 'facts.list.item.field',
+DETAIL_DICTIONARY = ['saved_suffix', 'saved_media_type', 'document_date_source', 'title_source', 'alternates.list.item.format', 'alternates.list.item.suffix', 'facts.list.item.field',
     'publisher_labels.list.item', 'page_metadata.list.item.field', 'page_metadata.list.item.format', 'page_metadata.list.item.precision', 'main_content.outcome']
 
 
@@ -163,7 +176,7 @@ CORE_RELATIONS = {'list': 'ordered', 'detail': 'details', 'links': 'links', 'url
 def _core(steps, output,*,lookup_extra=None):
     order = ['filename', 'document_date', 'first_captured', 'doc_key']
     detail_inputs = ','.join('o.'+name for name in dict.fromkeys([*order,*LIST_COLUMNS,'list_row',
-        'document_date_source','document_date_status','in_archive_since','removed_on','review_note','review_decided_at',
+        'document_date_source','document_date_status','title_source','in_archive_since','removed_on','review_note','review_decided_at',
         'alternates','package_id','facts',*PAGE_COLUMNS]))
     steps += [_step('ordered', f"SELECT *,{DOCUMENT_DATE_STATUS} AS document_date_status,cast(row_number() OVER(ORDER BY filename,document_date NULLS LAST,first_captured NULLS LAST,doc_key)-1 AS INT) AS list_row FROM normalized", materialize=True),
         _step('source_rows', """SELECT o.list_row,s.*,cast(row_number() OVER(PARTITION BY o.list_row ORDER BY s.is_saved DESC,s.first_seen NULLS LAST,s.url,s.member_path NULLS LAST)-1 AS INT) AS ordinal,
@@ -174,7 +187,9 @@ def _core(steps, output,*,lookup_extra=None):
             cast(row_number() OVER(ORDER BY o.list_row,r.recovery_key)-1 AS INT) AS recovery_index
             FROM (SELECT doc_key,list_row FROM ordered) o JOIN recovery_input r ON r.doc_key=o.doc_key""", materialize=True),
         _step('recovery_ranges', 'SELECT doc_key,min(recovery_index) AS rec_start,cast(count(*) AS INT) AS rec_len FROM recovery_rows GROUP BY doc_key'),
-        _step('details', f"""SELECT {detail_inputs},CASE WHEN saved_kind='recovery' THEN {_hash_key('o.source_url', 'url:')}
+        # A recovery-only row is found by its link, unless it is an edition moved off its link (ct-u9y4), which
+        # carries its body as its one link body and is found by that.
+        _step('details', f"""SELECT {detail_inputs},CASE WHEN saved_kind='recovery' AND coalesce(cardinality(o.link_bodies),0)=0 THEN {_hash_key('o.source_url', 'url:')}
             ELSE {_binary('substr(body_hex,1,16)', 8)} END AS link_key,
             {_binary('body_hex', 32)} AS saved_body,CASE WHEN body_hex IS NOT NULL THEN suffix END AS saved_suffix,CASE WHEN body_hex IS NOT NULL THEN media_type END AS saved_media_type,bytes AS saved_bytes,
             coalesce(s.src_start,cast(0 AS INT)) AS src_start,coalesce(s.src_len,cast(0 AS INT)) AS src_len,
@@ -182,7 +197,7 @@ def _core(steps, output,*,lookup_extra=None):
             FROM recovery_ranges r RIGHT JOIN (source_ranges s RIGHT JOIN ordered o ON o.doc_key=s.doc_key) ON o.doc_key=r.doc_key""", materialize=True),
         _step('body_links', "SELECT list_row,unnest(link_bodies) AS body_hex FROM ordered"),
         _step('all_links', f"""SELECT {_binary('substr(body_hex,1,16)', 8)} AS link_key,list_row,'body:' || body_hex AS origin FROM body_links
-            UNION ALL SELECT {_hash_key('original_url', 'url:')},list_row,'url:' || original_url FROM recovery_rows"""),
+            UNION ALL SELECT {_hash_key('original_url', 'url:')},list_row,'url:' || original_url FROM recovery_rows WHERE keyed"""),
         _step('links', 'SELECT link_key,min(list_row) AS list_row FROM all_links GROUP BY link_key'),
         _step('lookup_sources', "SELECT DISTINCT list_row,url FROM source_rows UNION SELECT DISTINCT list_row,original_url AS url FROM recovery_rows"+((' UNION '+lookup_extra) if lookup_extra else '')),
     ]
@@ -217,7 +232,7 @@ def _release_schema(available=None, entity_digests=None):
     return build_schema(available, entity_digests=entity_digests)
 
 
-NORMAL_DEFAULTS = dict(body_expected='true', title='cast(NULL AS VARCHAR)', document_kind=EMPTY_STRINGS,
+NORMAL_DEFAULTS = dict(body_expected='true', title='cast(NULL AS VARCHAR)', title_source='cast(NULL AS VARCHAR)', document_kind=EMPTY_STRINGS,
     document_family=EMPTY_STRINGS, committee_keys=EMPTY_STRINGS, chambers=EMPTY_STRINGS,
     congress='cast(NULL AS SMALLINT)', format="'other'", document_date='cast(NULL AS DATE)',
     first_captured='cast(NULL AS DATE)', date_kind="'unknown'", saved_kind="'original'", hidden='false',
@@ -268,7 +283,8 @@ def _execute(inputs, steps, *, output, scratch, engine, origin, auxiliary=None, 
     from viewer_publication.archive_schema import publication_checks
     diagnostics = [*diagnostics, *publication_checks(schema, aux_names, published=[item['name'] for item in outputs],
         keyed_documents=origin['kind'] != 'converted_catalog',
-        ordered_keys={item['name'].removesuffix('.parquet'):[key['field'] for key in item['settings']['order_by']] for item in outputs})]
+        ordered_keys={item['name'].removesuffix('.parquet'):[key['field'] for key in item['settings']['order_by']] for item in outputs},
+        input_names={item['name'] for item in inputs})]
     outputs.extend(extra_outputs)
     facets = [f"SELECT '{name}' AS facet,cast({name} AS VARCHAR) AS value,count(*) AS count FROM ordered WHERE NOT hidden GROUP BY {name}" for name in ['format', 'congress', 'saved_kind']]
     facets += [f"SELECT '{name}' AS facet,value,count(*) AS count FROM (SELECT unnest({name}) AS value FROM ordered WHERE NOT hidden) GROUP BY value" for name in ['document_kind', 'document_family', 'committee_keys', 'chambers', 'meeting_keys']]
@@ -329,6 +345,8 @@ def _execute(inputs, steps, *, output, scratch, engine, origin, auxiliary=None, 
         coverage_parts.append("SELECT 'committees.parquet' AS file,cast(NULL AS SMALLINT) AS congress_start,cast(NULL AS SMALLINT) AS congress_end,min(n['start']) AS date_start,max(n['end']) AS date_end FROM (SELECT unnest(names) AS n FROM committees_export WHERE names IS NOT NULL)")
     if 'members' in aux_names:
         coverage_parts.append("SELECT 'members.parquet' AS file,cast(NULL AS SMALLINT) AS congress_start,cast(NULL AS SMALLINT) AS congress_end,min(t['start']) AS date_start,max(t['end']) AS date_end FROM (SELECT unnest(terms) AS t FROM members_export WHERE terms IS NOT NULL)")
+    if 'people' in aux_names:
+        coverage_parts.append("SELECT 'people.parquet' AS file,cast(NULL AS SMALLINT) AS congress_start,cast(NULL AS SMALLINT) AS congress_end,min(first_seen_date) AS date_start,max(last_seen_date) AS date_end FROM people_export")
     if 'rosters' in aux_names:
         coverage_parts.append("SELECT 'rosters.parquet' AS file,min(congress) AS congress_start,max(congress) AS congress_end,cast(NULL AS DATE) AS date_start,cast(NULL AS DATE) AS date_end FROM rosters_export")
     if 'bills' in aux_names:
@@ -425,6 +443,7 @@ def _auxiliary():
                 cast(NULL AS VARCHAR) AS house_xml_updated,cast(NULL AS VARCHAR) AS congress_gov_meeting_type,
                 cast(NULL AS VARCHAR) AS access,cast(NULL AS VARCHAR) AS access_basis,cast(NULL AS BOOLEAN) AS not_held,cast(NULL AS BIGINT) AS rescheduled_to,cast(NULL AS VARCHAR) AS rescheduled_basis,
                 {NULL_MEETING_DOCUMENT_REFERENCES} AS document_references,
+                {EMPTY_UNLISTED_SUBJECTS} AS unlisted_subjects,
                 {UNKNOWN_OBSERVATION} AS congress_gov_detail_observation FROM meta GROUP BY event_id""", ['event_id'],
             MEETING_DICTIONARY),
         ('committees', f"""SELECT system_code,name,chamber,cast(NULL AS VARCHAR) AS committee_type,
@@ -432,6 +451,7 @@ def _auxiliary():
             cast(NULL AS BOOLEAN) AS is_current FROM committee_input""", ['system_code'], ['chamber', 'committee_type', 'parent_system_code']),
         ('url_state', f"""SELECT cast(NULL AS VARCHAR) AS requested_url,cast(0 AS INT) AS attempts,
             {TS} AS last_attempt,cast(NULL AS SMALLINT) AS last_status,cast(NULL AS VARCHAR) AS last_outcome,
-            {TS} AS last_good_at,{TS} AS next_attempt_at WHERE false""", ['requested_url'], ['last_outcome']),
+            {TS} AS last_good_at,{TS} AS next_attempt_at,cast(NULL AS DATE) AS recheck_meeting_date,
+            array_slice(make_array(arrow_cast(NULL,'FixedSizeBinary(8)')),1,0) AS linked_from WHERE false""", ['requested_url'], ['last_outcome']),
     ]
 

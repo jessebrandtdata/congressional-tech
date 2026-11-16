@@ -56,6 +56,16 @@ def add_input(store,release,identity,runtime_pins=None):
     return write_input_receipts(store,release,record['input_digest'],record,keys)
 
 
+JOBS=Path(__file__).resolve().parents[3]/'model/jobs'
+
+
+def committed_maintenance():
+    """The committed spec, its references to other job files made absolute so a copy can live elsewhere."""
+    spec=json.loads((JOBS/'maintenance.json').read_text())
+    captures=dict(spec['raw_verification']['captures'],model_spec=str(JOBS/spec['raw_verification']['captures']['model_spec']))
+    return dict(spec,tables=str(JOBS/spec['tables']),raw_verification=dict(spec['raw_verification'],captures=captures))
+
+
 def fixture():
     store=Store();records=[add_input(store,LIVE,'one'),add_input(store,LIVE,'two'),
                            add_input(store,PREVIOUS,'previous'),add_input(store,PINNED,'external')]
@@ -323,7 +333,7 @@ def test_maintenance_and_backfill_cli_plan_and_execute_specs(tmp_path,capsys,mon
     assert archive_maintenance.main(['--spec',str(root/'model/jobs/maintenance.json'),'--plan'])==0
     maint_plan=json.loads(capsys.readouterr().out)
     assert maint_plan['status']=='planned' and maint_plan['executed'] is False
-    assert set(maint_plan['tables'])==set(ALL_TABLE_NAMES)
+    assert maint_plan['tables']==json.loads((root/'model/jobs/publish-daily.json').read_text())['tables']
     assert maint_plan['raw_verification']['captures']==json.loads(
         (root/'model/jobs/publish-model.json').read_text())['captures']
     assert maint_plan['raw_verification']['body_workers']==8
@@ -345,6 +355,46 @@ def test_maintenance_and_backfill_cli_plan_and_execute_specs(tmp_path,capsys,mon
     publisher=json.loads((root/'model/jobs/publish.json').read_text())['producers']
     assert {name:(Path(pin['path']).name,pin['sha256']) for name,pin in committed['producers'].items()}=={
         name:(Path(pin['path']).name,pin['sha256']) for name,pin in publisher.items()}
+
+
+def test_maintenance_names_exactly_the_tables_the_shipped_daily_writes():
+    # 2026-11-11 (ct-yndj): ea2cf179 moved the daily, backfill, model and producer anchors to the
+    # *_mvp_20261105 tables and left maintenance.json naming two superseded generations and
+    # missing committee, playlist and video records. The daily owns the list.
+    # Cannot see: whether a table exists in the live catalog (none is opened here).
+    from viewer_publication.archive_maintenance import load_spec
+    publish=json.loads((JOBS/'publish.json').read_text())
+    daily=json.loads((JOBS/publish['daily']['path']).read_text())['tables']
+    model=json.loads((JOBS/publish['model_spec']['path']).read_text())
+    backfill=json.loads((JOBS/'backfill.json').read_text())['tables']
+    tables=load_spec(JOBS/'maintenance.json')['tables']
+    assert tables==daily
+    assert backfill=={name:daily.get(name) for name in backfill}
+    for name,table in tables.items():
+        # The shipped release was built from this physical table, so it existed then.
+        assert '/'+'/'.join([*table['namespace'],table['name']])+'/metadata/' in model[name]['metadata_location'],name
+
+
+@pytest.mark.parametrize('entry',[dict(rebuild=dict(readings={})),dict(purge=[dict(table='readings',pin={})])])
+def test_lake_rebuild_and_purge_need_an_explicit_table_map(tmp_path,entry):
+    # The daily reference follows the live tables: a rebuild would aim at a live table and a
+    # purge target would move whenever the daily moves. Both name their targets explicitly.
+    from viewer_publication.archive_maintenance import load_spec
+    lake={**dict(observations={},rebuild={},purge=[]),**entry}
+    path=tmp_path/'maintenance.json'
+    path.write_text(json.dumps(dict(committed_maintenance(),lake_maintenance=lake)))
+    with pytest.raises(ValueError,match='explicit tables map'):load_spec(path)
+    daily=json.loads((JOBS/'publish-daily.json').read_text())['tables']
+    path.write_text(json.dumps(dict(committed_maintenance(),tables=daily,lake_maintenance=lake)))
+    assert load_spec(path)['lake_maintenance']==lake
+
+
+def test_maintenance_tables_must_name_a_spec_that_lists_tables(tmp_path):
+    from viewer_publication.archive_maintenance import load_spec
+    (tmp_path/'daily.json').write_text(json.dumps(dict(version=1)))
+    path=tmp_path/'maintenance.json'
+    path.write_text(json.dumps(dict(json.loads((JOBS/'maintenance.json').read_text()),tables='daily.json')))
+    with pytest.raises(ValueError,match='lists its tables'):load_spec(path)
 
 
 def test_a_daily_backfill_of_the_r2_lake_refuses_without_producer_anchors(tmp_path):
@@ -393,6 +443,8 @@ def test_maintenance_execute_verifies_runtime_before_storage_access_and_backfill
     def never_storage(**_):
         events.append('storage')
         raise AssertionError('Storage must not be opened before engine verification')
+    from archive_job_fixture import constructed_runtime
+    stub_runtime=str(constructed_runtime(tmp_path/'stub-engine'))
     maint_spec=dict(
         version=1,
         bucket='archive-fixture',
@@ -401,7 +453,7 @@ def test_maintenance_execute_verifies_runtime_before_storage_access_and_backfill
         external_pins=[],
         tables={name:dict(namespace=['archive'],name=name) for name in ALL_TABLE_NAMES},
         thresholds=dict(file_count=256,manifest_count=64,scan_planning_seconds=30.0),
-        engine_config=str(tmp_path/'runtime.json'),
+        engine_config=stub_runtime,
         lake_maintenance=dict(observations={}),
     )
     with pytest.raises(ValueError,match='Runtime qualification failed'):
@@ -438,7 +490,7 @@ def test_maintenance_execute_verifies_runtime_before_storage_access_and_backfill
         tables={name:dict(namespace=['archive'],name=name) for name in (*ALL_TABLE_NAMES,'committee_records','playlist_records')},
         batch_size=100,
         max_batches=2,
-        engine_config=str(tmp_path/'runtime.json'),
+        engine_config=stub_runtime,
         producers=dict(appearance_records=dict(path=str(anchor),sha256=hashlib.sha256(anchor.read_bytes()).hexdigest(),
             size=anchor.stat().st_size)),
     )
@@ -535,11 +587,12 @@ def _maintenance_run(tmp_path,monkeypatch,*,execute,pin_old_during_verification=
         def __enter__(self):return self
         def __exit__(self,*_):pass
         def verify_runtime(self):return dict(verified=True)
+    from archive_job_fixture import constructed_runtime
     spec=dict(version=1,bucket='archive-fixture',catalog_root=None,work=str(tmp_path/'work'),external_pins=[],
         external_pins_source=str(pin_path),
         tables={name:dict(namespace=['archive'],name=name) for name in ALL_TABLE_NAMES},
         thresholds=dict(file_count=256,manifest_count=64,scan_planning_seconds=30.0),
-        engine_config=str(tmp_path/'runtime.json'),
+        engine_config=str(constructed_runtime(tmp_path/'stub-engine')),
         raw_verification=dict(captures=str(inputs/'captures.parquet'),
             receipt_inventory=str(inputs/'receipt-inventory.json'),
             verification_inventory=str(inputs/'verification-inventory.json'),apply_staged=True,body_workers=8),
@@ -601,8 +654,7 @@ def test_cli_dry_run_stages_bucket_receipts_and_verification_for_native_checks(t
 
     captures=tmp_path/'captures.parquet'
     pq.write_table(pa.table({'body_key':pa.array([],type=pa.string())}),captures)
-    root=Path(__file__).resolve().parents[3]
-    spec=json.loads((root/'model/jobs/maintenance.json').read_text())
+    spec=committed_maintenance()
     spec.pop('external_pins_source')
     work=tmp_path/'run'
     spec.update(work=str(work),engine_config=os.environ['DOCSPEC_JOB_CONFIG'],external_pins=[PINNED],
@@ -643,10 +695,102 @@ def test_maintenance_can_stage_a_verifier_baseline_above_the_unreadable_file_lim
 def test_maintenance_spec_rejects_invalid_raw_body_worker_count(tmp_path,workers):
     from viewer_publication.archive_maintenance import load_spec
 
-    root=Path(__file__).resolve().parents[3]
-    spec=json.loads((root/'model/jobs/maintenance.json').read_text())
+    spec=committed_maintenance()
     spec['raw_verification'].update(captures='captures.parquet',body_workers=workers)
     path=tmp_path/'maintenance.json'
     path.write_text(json.dumps(spec))
     with pytest.raises(ValueError,match='body_workers'):
         load_spec(path)
+
+
+def test_backfill_plan_reports_target_schemas_and_record_counts_and_execute_refuses_before_storage(tmp_path, capsys):
+    """ct-eav2: --plan reports target schema + record counts; --execute refuses missing target fields before storage."""
+    import os
+    import pyarrow.parquet as pq
+    from congress_api.lake import appearance_records, tables
+    from congress_api.lake.daily import ALL_TABLE_NAMES
+    from docspec_client.client import NativeDatasets
+    from viewer_publication import archive_backfill_job
+
+    catalog = tmp_path / 'catalog'
+    table_names = (*ALL_TABLE_NAMES, 'committee_records', 'playlist_records')
+    refs = {name: dict(namespace=['archive'], name=name) for name in table_names}
+    with NativeDatasets.from_config(os.environ['DOCSPEC_JOB_CONFIG']) as engine:
+        for idx, name in enumerate(table_names):
+            schema = tables.load_schema(name)
+            if name == 'appearance_records':
+                schema = dict(schema, fields=[
+                    f for f in schema['fields'] if f['name'] not in ('committees', 'committee_members')
+                ])
+            tables.create_table(
+                engine=engine, work=tmp_path / f'create-{name}', catalog_root=catalog,
+                table=refs[name], schema=schema, location=tmp_path / 'lake' / name, create_namespace=(idx == 0),
+            )
+        current_cg = appearance_records.current_versions()['congress_gov']
+        seed_rows = appearance_records.table([
+            dict(record_sha='1' * 64, source='mods', parser_version='old-mods', status='completed', appearances=[]),
+            dict(record_sha='2' * 64, source='mods', parser_version='old-mods', status='completed', appearances=[]),
+            dict(record_sha='3' * 64, source='congress_gov', parser_version=current_cg, status='completed', appearances=[]),
+        ]).drop_columns(['committees', 'committee_members'])
+        seed_parquet = tmp_path / 'seed-appearances.parquet'
+        pq.write_table(seed_rows, seed_parquet)
+        tables.append_rows(
+            seed_parquet, engine=engine, work=tmp_path / 'seed-append', catalog_root=catalog,
+            table=refs['appearance_records'], keys=['record_sha', 'source', 'parser_version'], definition='seed',
+        )
+        from congress_api.lake import readings
+        from congress_api.retention.provenance import json_input, parquet_output, run_job
+        current_html = readings.current_version('html')
+        cast_dir = tmp_path / 'seed-readings-cast'
+        cast_dir.mkdir()
+        raw_input = json_input(cast_dir, 'raw', [
+            dict(body_hex='a' * 64, parser='html', parser_version='old-html', status='completed',
+                 fingerprint_hex='f' * 64, links=[], fields=[], named_meetings=[]),
+            dict(body_hex='a' * 64, parser='html', parser_version=current_html, status='completed',
+                 fingerprint_hex='f' * 64, links=[], fields=[], named_meetings=[]),
+            dict(body_hex='b' * 64, parser='html', parser_version='old-html', status='completed',
+                 fingerprint_hex='e' * 64, links=[], fields=[], named_meetings=[]),
+        ], **readings._reading_fields())
+        run_job(
+            cast_dir, engine,
+            inputs=[raw_input], steps=[],
+            outputs=[parquet_output(cast_dir, 'readings',
+                                    f'SELECT {readings._LAKE_READING_COLUMNS} FROM raw', readings.PK)],
+        )
+        tables.append_rows(
+            tmp_path / 'seed-readings-cast/readings.parquet', engine=engine, work=tmp_path / 'seed-readings-append',
+            catalog_root=catalog, table=refs['readings'], keys=readings.PK, definition='seed-readings',
+        )
+
+    spec_path = tmp_path / 'backfill.json'
+    spec_path.write_text(json.dumps(dict(
+        version=1,
+        bucket='archive-fixture',
+        catalog_root=str(catalog),
+        work=str(tmp_path / 'backfill-work'),
+        tables=refs,
+        batch_size=1,
+        max_batches=1,
+        engine_config=os.environ['DOCSPEC_JOB_CONFIG'],
+    )))
+    assert archive_backfill_job.main(['--spec', str(spec_path), '--plan']) == 0
+    planned = json.loads(capsys.readouterr().out)
+    assert planned['target_schemas']['captures']['compatible'] is True
+    assert planned['target_schemas']['appearance_records']['compatible'] is False
+    assert planned['target_schemas']['appearance_records']['missing_fields'] == ['committee_members', 'committees']
+    assert 'committees' not in [c['name'] for c in planned['target_schemas']['appearance_records']['columns']]
+    assert planned['record_counts']['appearance_records'] == dict(
+        total_rows=3, current_rows=1, stale_records=2, would_touch=1,
+    )
+    assert planned['record_counts']['readings'] == dict(
+        total_rows=3, current_rows=1, stale_records=1, would_touch=1,
+    )
+    assert not (tmp_path / 'backfill-work').exists()
+
+    def forbidden_storage(**_kwargs):
+        raise AssertionError('R2 storage opened before target schema compatibility check')
+
+    with pytest.raises(ValueError, match=r'appearance_records.*committee_members.*committees'):
+        archive_backfill_job.execute(archive_backfill_job.load_spec(spec_path), storage_factory=forbidden_storage)
+    assert not (tmp_path / 'backfill-work').exists()
+
