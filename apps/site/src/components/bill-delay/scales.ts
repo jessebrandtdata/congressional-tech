@@ -93,3 +93,20 @@ export function stepArea(xs: number[], upper: number[], lower: number[]): string
   for (let i = xs.length - 1; i > 0; i -= 1) back += `H${xs[i]}V${lower[i - 1]}`;
   return `${top}${back}H${xs[0]}Z`;
 }
+
+/** Labels for the histogram's median and mean lines, on the row above the plot. Each label sits beside its own line:
+ *  the leftmost line's label to its left, the others to their right, so two labels never cross. A left label that would
+ *  run past the y-axis (at left) or a right label past the plot's edge (at right) joins the other into one label. */
+export function ruleLabels(rules: [number, string][], left: number, right: number): { x: number; text: string; anchor: 'start' | 'end' }[] {
+  const width = (s: string) => s.length * 6.2; // 11 px label text, about 6.2 px a character
+  const sorted = [...rules].sort((a, b) => a[0] - b[0]);
+  if (sorted.length === 1) {
+    const [px, text] = sorted[0];
+    return [px - 4 - width(text) < left ? { x: px + 4, text, anchor: 'start' } : { x: px - 4, text, anchor: 'end' }];
+  }
+  const [[lo, loText], [hi, hiText]] = sorted;
+  const text = `${loText}, ${hiText}`;
+  if (lo - 4 - width(loText) < left) return [{ x: hi + 4, text, anchor: 'start' }];
+  if (hi + 4 + width(hiText) > right) return [{ x: lo - 4, text, anchor: 'end' }];
+  return [{ x: lo - 4, text: loText, anchor: 'end' }, { x: hi + 4, text: hiText, anchor: 'start' }];
+}

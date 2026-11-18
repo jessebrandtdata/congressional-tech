@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  bandScale, cardNumber, dateTicks, dayName, fmt, fmtShort, isoDay, linearScale, stepArea, stepPath, tickStep,
+  bandScale, cardNumber, dateTicks, dayName, fmt, fmtShort, isoDay, linearScale, ruleLabels, stepArea, stepPath, tickStep,
 } from './scales.ts';
 
 test('tickStep picks 1, 2 or 5 times a power of ten', () => {
@@ -62,4 +62,26 @@ test('step paths run flat to the next point, and the area closes on the lower li
   assert.equal(stepPath([[0, 10], [5, 6], [9, 2]]), 'M0,10H5V6H9V2');
   assert.equal(stepPath([]), '');
   assert.equal(stepArea([0, 5], [6, 2], [10, 8]), 'M0,6H5V2V8H5V10H0Z');
+});
+
+test('ruleLabels labels each line on its own side when both fit', () => {
+  // median left of its line, mean right of its line: the two cannot cross however close the lines are
+  assert.deepEqual(ruleLabels([[392, 'median 116d'], [529, 'mean 178d']], 56, 904), [
+    { x: 388, text: 'median 116d', anchor: 'end' },
+    { x: 533, text: 'mean 178d', anchor: 'start' },
+  ]);
+  assert.deepEqual(ruleLabels([[500, 'median 29d'], [514, 'mean 51d']], 56, 904), [
+    { x: 496, text: 'median 29d', anchor: 'end' },
+    { x: 518, text: 'mean 51d', anchor: 'start' },
+  ]);
+});
+
+test('ruleLabels joins the labels when the left one would cross the y-axis or the right one the plot edge', () => {
+  assert.deepEqual(ruleLabels([[104, 'mean 51d'], [90, 'median 29d']], 56, 904), [{ x: 108, text: 'median 29d, mean 51d', anchor: 'start' }]);
+  assert.deepEqual(ruleLabels([[860, 'median 900d'], [890, 'mean 950d']], 56, 904), [{ x: 856, text: 'median 900d, mean 950d', anchor: 'end' }]);
+});
+
+test('ruleLabels puts a lone line\'s label left of it unless the y-axis is in the way', () => {
+  assert.deepEqual(ruleLabels([[600, 'median 300d']], 56, 904), [{ x: 596, text: 'median 300d', anchor: 'end' }]);
+  assert.deepEqual(ruleLabels([[70, 'median 3d']], 56, 904), [{ x: 74, text: 'median 3d', anchor: 'start' }]);
 });

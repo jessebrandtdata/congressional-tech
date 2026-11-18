@@ -3,7 +3,7 @@
 import type { ReactNode } from 'react';
 import { binLags, headerMetrics, histogramMax, type DateRange, type DelayRecord } from './metrics.ts';
 import {
-  bandScale, dateTicks, fmt, fmtPercent, fmtPercent1, fmtShort, isoDay, linearScale, monthName, stepArea, stepPath,
+  bandScale, dateTicks, fmt, fmtPercent, fmtPercent1, fmtShort, isoDay, linearScale, monthName, ruleLabels, stepArea, stepPath,
 } from './scales.ts';
 
 // The site's coverage colors (the YouTube dashboard): "has it" is the primary blue, "missing it" is the gold.
@@ -84,7 +84,7 @@ export function Histogram({ records, width, includeWaiting }: { records: DelayRe
           {x.bandwidth >= 18 && b.count > 0 && (
             <text x={x(i) + x.bandwidth / 2} y={y(b.count) - 4} textAnchor="middle" className="bd-chart-label">{fmt(b.count)}</text>
           )}
-          {i % every === 0 && (
+          {i % every === 0 && (!includeWaiting || bins.length - i >= every) && (
             <text x={x(i) + x.bandwidth / 2} y={H - bottom + 14} textAnchor="middle" className="dash-axis-text bd-small">{binLabel(b)}</text>
           )}
         </g>
@@ -98,15 +98,13 @@ export function Histogram({ records, width, includeWaiting }: { records: DelayRe
           <text x={x('waiting') + x.bandwidth / 2} y={H - bottom + 14} textAnchor="middle" className="dash-axis-text bd-small">waiting</text>
         </g>
       )}
-      {rules.map(([v, label]) => {
-        const crowded = label === 'mean' && m.lagMedian !== null && Math.abs(pos(v) - pos(m.lagMedian)) < 60;
-        return (
-          <g key={label}>
-            <line x1={pos(v)} x2={pos(v)} y1={top - 6} y2={H - bottom} stroke={INK} strokeWidth={1.5} strokeDasharray={label === 'mean' ? '4 3' : undefined} />
-            <text x={pos(v) - 4} y={crowded ? top + 4 : top - 10} textAnchor="end" className="bd-chart-label">{`${label} ${Math.round(v)}d`}</text>
-          </g>
-        );
-      })}
+      {rules.map(([v, label]) => (
+        <line key={label} x1={pos(v)} x2={pos(v)} y1={top - 6} y2={H - bottom} stroke={INK} strokeWidth={1.5}
+          strokeDasharray={label === 'mean' ? '4 3' : undefined} />
+      ))}
+      {ruleLabels(rules.map(([v, label]) => [pos(v), `${label} ${Math.round(v)}d`]), left, W - right).map((l) => (
+        <text key={l.text} x={l.x} y={top - 10} textAnchor={l.anchor} className="bd-chart-label">{l.text}</text>
+      ))}
       <text x={(left + W - right) / 2} y={H - 14} textAnchor="middle" className="bd-chart-label">lag in days</text>
       <YLabel y={(top + H - bottom) / 2}>bills</YLabel>
     </svg>
@@ -188,7 +186,9 @@ export function Cumulative({ series, keys, labels, title, yLabel, note = '' }: {
       <path d={stepPath(xs.map((px, i) => [px, y(upper[i])]))} fill="none" stroke={INK} strokeWidth={2} />
       <path d={stepPath(xs.map((px, i) => [px, y(lower[i])]))} fill="none" stroke={BLUE} strokeWidth={2} />
       <text x={W - right} y={y(upper[last]) - 6} textAnchor="end" className="bd-chart-label">{`${fmt(upper[last])} ${labels[0]}`}</text>
-      <text x={W - right} y={y(lower[last]) - 6} textAnchor="end" className="bd-chart-label bd-blue">{`${fmt(lower[last])} ${labels[1]}`}</text>
+      {/* lines ending within a label's height of each other: the lower line's label goes under its line */}
+      <text x={W - right} y={y(lower[last]) - y(upper[last]) < 16 ? y(lower[last]) + 15 : y(lower[last]) - 6} textAnchor="end"
+        className="bd-chart-label bd-blue">{`${fmt(lower[last])} ${labels[1]}`}</text>
     </svg>
   );
 }
