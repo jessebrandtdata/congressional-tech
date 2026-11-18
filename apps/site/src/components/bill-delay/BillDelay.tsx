@@ -335,11 +335,8 @@ export default function BillDelay() {
         Proposal IV.2 counts pages of bill text; the source data has no page count yet, so the page sizes bills in
         characters or sections of their parsed text instead. The summary date is the earliest the summary record retains.
         Summaries first captured before the spicy-regs warehouse began keeping revisions (2026-11-06) carry only their
-        latest revision, so a summary revised later reads slower than it was. A few summaries are missing from the source
-        data: the warehouse reads GovInfo&apos;s BILLSTATUS bulk files, which lack some summaries CRS published, mostly ones
-        added after a Congress ended (as of 2026-11-09, 82 in the 118th Congress and 2 in the 117th that GovInfo&apos;s
-        separate BILLSUM files have, plus some that only the Congress.gov API has). Those bills show here as still
-        waiting.
+        latest revision, so a summary revised later reads slower than it was. Some summaries CRS published after a
+        Congress ended aren&apos;t in the source data yet; those bills show as still waiting.
       </div>
     </div>
   );
